@@ -52,3 +52,48 @@ graph TD
     class OverlayFabric,VNF,MP overlay;
     class Node,DAEMON,TUN,ROUTER,POLICY,METRICS node;
     class Underlay,ISP1,ISP2,LAN underlay;
+
+%% --------------------------------------------------------
+%% Virtual Network Fabric Focus Diagram
+%% --------------------------------------------------------
+
+---
+title: Virtual Network Fabric Overview
+---
+
+graph TD
+    %% Virtual Network Fabric focus
+
+    subgraph Fabric["Virtual Network Fabric (Global Overlay)"]
+        FABRIC["Virtual Network Fabric Core"]
+    end
+
+    subgraph NodeA["QuicEther Node A"]
+        VNA1["Virtual Network Adapter A1"]
+        VNA2["Virtual Network Adapter A2"]
+    end
+
+    subgraph NodeB["QuicEther Node B"]
+        VNB1["Virtual Network Adapter B1"]
+        VNB2["Virtual Network Adapter B2"]
+    end
+
+    subgraph NodeC["QuicEther Node C"]
+        VNC1["Virtual Network Adapter C1"]
+    end
+
+    %% Connections into the fabric
+    VNA1 --- FABRIC
+    VNA2 --- FABRIC
+    VNB1 --- FABRIC
+    VNB2 --- FABRIC
+    VNC1 --- FABRIC
+
+    %% Optional underlay links
+    subgraph UnderlayNet["Underlay Networks"]
+        U1["ISP / WAN Links"]
+        U2["LAN / Wi-Fi"]
+    end
+
+    FABRIC -. "QUIC Tunnels" .- U1
+    FABRIC -. "QUIC Tunnels" .- U2
