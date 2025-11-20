@@ -37,33 +37,63 @@ User runs: quicether start
 
 ### The 5-Minute Architecture Diagram
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     QuicEther Node                          │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
-│  │ Control Plane│  │  Data Plane  │  │ Management   │    │
-│  └──────────────┘  └──────────────┘  └──────────────┘    │
-│         │                  │                  │            │
-│    ┌────┴────┐        ┌────┴────┐        ┌────┴────┐     │
-│    │   DHT   │        │  QUIC   │        │  Metrics│     │
-│    │Discovery│        │Transport│        │ /Health │     │
-│    └─────────┘        └─────────┘        └─────────┘     │
-│         │                  │                               │
-│    ┌────┴────────────┬─────┴─────┐                       │
-│    │                 │           │                        │
-│ ┌──▼───┐      ┌─────▼──┐   ┌───▼────┐                   │
-│ │ TUN  │      │ Policy │   │ Multi- │                   │
-│ │Device│      │ Engine │   │ path   │                   │
-│ └──┬───┘      └────────┘   └────────┘                   │
-│    │                                                      │
-└────┼──────────────────────────────────────────────────────┘
-     │
-     ▼
-┌────────────────┐
-│  Linux Kernel  │
-│  (Networking)  │
-└────────────────┘
+Rendered Mermaid diagram (see `diagrams/architecture.md` for source):
+
+```mermaid
+graph TD
+    %% Top layer: Control plane
+    subgraph ControlPlane[Control Plane]
+        DHT["DHT Node (Kademlia)"]
+        BOOT["Bootstrap Nodes"]
+    end
+
+    %% Middle layer: Overlay fabric
+    subgraph OverlayFabric["QUIC Overlay Fabric"]
+        VNF["Virtual Network Fabric"]
+        MP["Multipath Manager"]
+    end
+
+    %% Bottom layer: Data plane per node
+    subgraph Node["QuicEther Node"]
+        DAEMON["quicether Daemon"]
+        TUN["TUN Interface"]
+        ROUTER["Overlay Router"]
+        POLICY["Policy Engine"]
+        METRICS["Metrics & Health"]
+    end
+
+    %% External networks
+    subgraph Underlay["Physical Networks"]
+        ISP1["ISP / WAN #1"]
+        ISP2["ISP / WAN #2"]
+        LAN["Local LAN / Wi-Fi"]
+    end
+
+    %% Relationships
+    BOOT --- DHT
+    DHT <--> VNF
+
+    VNF <--> DAEMON
+    DAEMON --> MP
+    DAEMON --> ROUTER
+    ROUTER <--> TUN
+    DAEMON --> POLICY
+    DAEMON --> METRICS
+
+    MP <--> ISP1
+    MP <--> ISP2
+    DAEMON <--> LAN
+
+    %% Notes
+    classDef control fill:#e3f2fd,stroke:#1e88e5;
+    classDef overlay fill:#e8f5e9,stroke:#43a047;
+    classDef node fill:#fff3e0,stroke:#fb8c00;
+    classDef underlay fill:#f3e5f5,stroke:#8e24aa;
+
+    class ControlPlane,DHT,BOOT control;
+    class OverlayFabric,VNF,MP overlay;
+    class Node,DAEMON,TUN,ROUTER,POLICY,METRICS node;
+    class Underlay,ISP1,ISP2,LAN underlay;
 ```
 
 ---
