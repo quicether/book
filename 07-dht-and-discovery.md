@@ -179,6 +179,9 @@ Semantics:
 - Publisher: node itself
 - TTL: e.g., 1 hour (must be refreshed)
 
+
+### 7.1.1 DHT Topology Diagram
+
 ### 7.4.2 Subnet Advertisement Record
 
 Key:

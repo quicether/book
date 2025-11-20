@@ -1,3 +1,4 @@
+```mermaid
 graph TD
     %% Top layer: Control plane
     subgraph ControlPlane[Control Plane]
@@ -52,15 +53,9 @@ graph TD
     class OverlayFabric,VNF,MP overlay;
     class Node,DAEMON,TUN,ROUTER,POLICY,METRICS node;
     class Underlay,ISP1,ISP2,LAN underlay;
+```
 
-%% --------------------------------------------------------
-%% Virtual Network Fabric Focus Diagram
-%% --------------------------------------------------------
-
----
-title: Virtual Network Fabric Overview
----
-
+```mermaid
 graph TD
     %% Virtual Network Fabric focus
 
@@ -97,3 +92,35 @@ graph TD
 
     FABRIC -. "QUIC Tunnels" .- U1
     FABRIC -. "QUIC Tunnels" .- U2
+```
+
+```mermaid
+graph TD
+    %% DHT nodes forming the overlay
+    subgraph DHTCluster["Kademlia DHT"]
+        A["Node A\n(NodeId A)"]
+        B["Node B\n(NodeId B)"]
+        C["Node C\n(NodeId C)"]
+        D["Node D\n(NodeId D)"]
+        E["Node E\n(NodeId E)"]
+    end
+
+    %% Bucket relationships (logical)
+    A --- B
+    A --- C
+    B --- D
+    C --- E
+
+    %% Lookup flow
+    CLIENT["Lookup: SUBNET 10.0.0.0/16"] --> A
+    A -->|FIND_NODE / FIND_VALUE| B
+    B -->|Closer to key| D
+    D -->|Returns record| CLIENT
+
+    %% Record types
+    RECORD_NODE["DHT Record:\nNODE:<NodeId> → {addrs, pubkey, caps}"]
+    RECORD_SUBNET["DHT Record:\nSUBNET:<CIDR> → {owner NodeId}"]
+
+    D -. store .-> RECORD_NODE
+    D -. store .-> RECORD_SUBNET
+```
