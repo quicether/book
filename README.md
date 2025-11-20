@@ -25,7 +25,7 @@ Start here to understand the problem space:
    - Why isn't it good enough?
    - What can we learn from it?
 
-3. **User Stories & Use Cases** (Coming next)
+3. **[User Stories & Use Cases](./03-user-stories-and-use-cases.md)**
    - Who will use QuicEther?
    - What will they do with it?
    - What are the real-world scenarios?
@@ -33,17 +33,17 @@ Start here to understand the problem space:
 ### Phase 2: Solution Vision (Chapters 4-6)
 Once you understand the problem, explore the solution:
 
-4. **Core Principles & Philosophy** (Coming next)
+4. **[Core Principles & Philosophy](./04-core-principles.md)**
    - What are our guiding principles?
    - What trade-offs do we make?
    - What do we explicitly NOT do?
 
-5. **High-Level Architecture** (Coming next)
+5. **[High-Level Architecture](./05-architecture.md)**
    - What are the major components?
    - How do they fit together?
    - What are the interfaces between them?
 
-6. **Technology Choices & Trade-offs** (Coming next)
+6. **[Technology Choices & Trade-offs](./06-technology-choices.md)**
    - Why Rust? Why QUIC? Why Kademlia?
    - What did we reject and why?
    - What are the risks?
@@ -51,34 +51,46 @@ Once you understand the problem, explore the solution:
 ### Phase 3: Technical Deep-Dive (Chapters 7-11)
 For implementers who need to understand the details:
 
-7. **Network Layer Design (L2/L3)** (Coming next)
-8. **Distributed Discovery (Kademlia DHT)** (Coming next)
-9. **Persistent State (Blockchain)** (Coming next)
-10. **Multi-Path Aggregation** (Coming next)
-11. **Security Model & Zero-Trust** (Coming next)
+7. **[DHT & Discovery](./07-dht-and-discovery.md)**
+8. **[QUIC Transport & Multipath](./08-quic-and-multipath.md)**
+9. **[Security Model & Zero-Trust](./09-security-and-zero-trust.md)**
+10. **[VPN Interface & Routing](./10-vpn-interface-and-routing.md)**
+11. **[Daemon & CLI Architecture](./11-daemon-and-cli.md)**
 
 ### Phase 4: Implementation Strategy (Chapters 12-15)
 How to actually build this:
 
-12. **Development Phases** (Coming next)
-13. **Testing & Validation Strategy** (Coming next)
-14. **Deployment Models** (Coming next)
-15. **Performance Targets & Benchmarks** (Coming next)
+12. **[Implementation Roadmap](./12-implementation-roadmap.md)**
+13. **[Testing & Validation Strategy](./13-testing-and-validation.md)**
+14. **[Deployment & Operations](./14-deployment-and-operations.md)**
+15. **[Configuration Reference](./15-configuration-reference.md)**
 
-### Phase 5: Operations (Chapters 16-19)
-For those who will run QuicEther in production:
+### Phase 5: Future Directions (Chapter 16)
+Longer-term thinking and extensions:
 
-16. **Configuration Management** (Coming next)
-17. **Monitoring & Observability** (Coming next)
-18. **Troubleshooting & Debugging** (Coming next)
-19. **Upgrade & Migration Paths** (Coming next)
+16. **[Future Directions & Extensions](./16-future-directions-and-extensions.md)**
 
 ## Current Status
 
 ✅ **Chapter 0:** Introduction (Complete)  
 ✅ **Chapter 1:** The Problem We're Solving (Complete)  
 ✅ **Chapter 2:** Existing Solutions & Their Limitations (Complete)  
-🚧 **Chapter 3-19:** In Progress
+✅ **Chapter 3:** User Stories & Use Cases (Complete)  
+✅ **Chapter 4:** Core Principles & Philosophy (Complete)  
+✅ **Chapter 5:** High-Level Architecture (Complete)  
+✅ **Chapter 6:** Technology Choices & Trade-offs (Complete)  
+✅ **Chapter 7:** DHT & Discovery (Complete)  
+✅ **Chapter 8:** QUIC Transport & Multipath (Complete)  
+✅ **Chapter 9:** Security Model & Zero-Trust (Complete)  
+✅ **Chapter 10:** VPN Interface & Routing (Complete)  
+✅ **Chapter 11:** Daemon & CLI Architecture (Complete)  
+✅ **Chapter 12:** Implementation Roadmap (Complete)  
+✅ **Chapter 13:** Testing & Validation Strategy (Complete)  
+✅ **Chapter 14:** Deployment & Operations (Complete)  
+✅ **Chapter 15:** Configuration Reference (Complete)  
+✅ **Chapter 16:** Future Directions & Extensions (Complete)  
+
+🚧 Further chapters: To be defined as the project evolves
 
 ## How to Use This Book
 
@@ -175,14 +187,10 @@ We should update this book to reflect our evolving understanding.
 
 ## Next Steps
 
-The immediate priority is completing:
-- ✅ Chapter 1: The Problem
-- ✅ Chapter 2: Existing Solutions  
-- 🚧 Chapter 3: User Stories & Use Cases
-- 🚧 Chapter 4: Core Principles
-- 🚧 Chapter 5: High-Level Architecture
-
-Once these are solid, we have a foundation to start building.
+With the core chapters (0–16) written, the next steps are:
+- Refine chapters based on early prototyping and feedback
+- Add decision logs as major choices are validated or revised
+- Potentially add new chapters for advanced topics as they become concrete
 
 ## Questions or Feedback?
 
