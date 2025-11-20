@@ -98,11 +98,11 @@ graph TD
 graph TD
     %% DHT nodes forming the overlay
     subgraph DHTCluster["Kademlia DHT"]
-        A["Node A\n(NodeId A)"]
-        B["Node B\n(NodeId B)"]
-        C["Node C\n(NodeId C)"]
-        D["Node D\n(NodeId D)"]
-        E["Node E\n(NodeId E)"]
+        A["Node A (NodeId A)"]
+        B["Node B (NodeId B)"]
+        C["Node C (NodeId C)"]
+        D["Node D (NodeId D)"]
+        E["Node E (NodeId E)"]
     end
 
     %% Bucket relationships (logical)
@@ -118,8 +118,8 @@ graph TD
     D -->|Returns record| CLIENT
 
     %% Record types
-    RECORD_NODE["DHT Record:\nNODE:<NodeId> → {addrs, pubkey, caps}"]
-    RECORD_SUBNET["DHT Record:\nSUBNET:<CIDR> → {owner NodeId}"]
+    RECORD_NODE["DHT Record: NODE:<NodeId> → {addrs, pubkey, caps}"]
+    RECORD_SUBNET["DHT Record: SUBNET:<CIDR> → {owner NodeId}"]
 
     D -. store .-> RECORD_NODE
     D -. store .-> RECORD_SUBNET

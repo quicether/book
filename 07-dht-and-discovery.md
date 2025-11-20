@@ -1,34 +1,34 @@
 # Chapter 7: DHT & Discovery
-
-## Introduction
-
-The Distributed Hash Table (DHT) is the **nervous system** of QuicEther.
-
-It is responsible for:
-- Finding other nodes
-- Locating subnets and gateways
-- Bootstrapping new nodes into the overlay
-
-This chapter goes deep into:
-- DHT design (Kademlia-based)
-- Data model (what we store)
-- Wire protocol (how nodes talk)
-- Security considerations (Sybil, poisoning)
-- Operational behavior (joins, leaves, churn)
-
----
-
-## 7.1 Requirements
-
-Before designing the DHT, we restate what it must do:
-
-1. **Node Discovery**
-   - Given `NodeId`, find its current reachable addresses
-
-2. **Subnet Discovery**
-   - Given `CIDR`, find which node(s) advertise it
-
-3. **Gateway Discovery**
+```mermaid
+graph TD
+  %% DHT nodes forming the overlay
+  subgraph DHTCluster["Kademlia DHT"]
+    A["Node A (NodeId A)"]
+    B["Node B (NodeId B)"]
+    C["Node C (NodeId C)"]
+    D["Node D (NodeId D)"]
+    E["Node E (NodeId E)"]
+  end
+    
+  %% Bucket relationships (logical)
+  A --- B
+  A --- C
+  B --- D
+  C --- E
+    
+  %% Lookup flow
+  CLIENT["Lookup: SUBNET 10.0.0.0/16"] --> A
+  A -->|FIND_NODE / FIND_VALUE| B
+  B -->|Closer to key| D
+  D -->|Returns record| CLIENT
+    
+  %% Record types
+  RECORD_NODE["DHT Record: NODE:<NodeId> → {addrs, pubkey, caps}"]
+  RECORD_SUBNET["DHT Record: SUBNET:<CIDR> → {owner NodeId}"]
+    
+  D -. store .-> RECORD_NODE
+  D -. store .-> RECORD_SUBNET
+```
    - Given a node or subnet, discover which gateway(s) can forward to it
 
 4. **Bootstrap**
