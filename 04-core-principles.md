@@ -47,32 +47,34 @@ This chapter defines the **non-negotiable** principles and the **pragmatic trade
 
 ---
 
-## Principle 2: Distributed by Default
+## Principle 2: Server Mesh for Distribution
 
 ### Statement
-**Every node participates equally in discovery. No centralized authority.**
+**Server-to-server mesh tunnels provide distributed topology without DHT complexity.**
 
 ### Rationale
 - Problem: Tailscale's coordination server is single point of failure
-- Problem: Nebula's lighthouse creates bottleneck
-- Insight: DHT (like BitTorrent) scales to millions without coordination
+- Problem: DHT adds complexity for initial versions without proven need
+- Insight: httpf proved server mesh works reliably with auto-reconnection
+- Insight: Server mesh scales to multi-site deployments practically
 
 ### Implementation
-- ✅ Embedded Kademlia DHT in every node
-- ✅ No special "master" or "coordinator" nodes
-- ✅ New nodes join by contacting any bootstrap node
-- ✅ Bootstrap nodes are just regular nodes with public IPs
+- ✅ Servers connect to peers via QUIC tunnels using service tokens
+- ✅ Peer routing forwards packets between server subnets
+- ✅ Auto-reconnection with exponential backoff
+- ✅ No central coordinator — each server maintains its mesh peers
+- ✅ DHT can be added as optional future extension for P2P discovery
 
 ### Trade-Off
 **What we sacrifice:**
-- Immediate consistency (DHT takes ~30 seconds to propagate)
-- Perfect ordering of events
-- Central audit trail (must aggregate logs from nodes)
+- Pure peer-to-peer (clients still connect to servers)
+- Fully automatic discovery (mesh peers configured explicitly)
 
 **Why this is acceptable:**
-- 30-second discovery is fast enough for VPN use cases
-- We don't need perfect consistency (eventual is fine)
-- Distributed audit logs are solvable problem (Elasticsearch, Loki)
+- Server mesh is proven working in httpf
+- Covers 95% of real deployment scenarios
+- Simpler to deploy, debug, and secure than DHT
+- DHT can be layered on later without breaking existing architecture
 
 ### Non-Example
 ❌ Central database with all node states  
@@ -80,21 +82,21 @@ This chapter defines the **non-negotiable** principles and the **pragmatic trade
 
 ---
 
-## Principle 3: Direct Connection is Sacred
+## Principle 3: Direct Connection When Possible
 
 ### Statement
-**Always prefer direct node-to-node. Gateway forwarding is fallback, never default.**
+**Prefer direct client-to-server QUIC connections. Use cascade/mesh forwarding as fallback, not default.**
 
 ### Rationale
 - Problem: Traditional VPNs force all traffic through central server
-- Problem: Some mesh VPNs use vendor relays by default
-- Insight: Direct connection = lowest latency, highest throughput, no bottleneck
+- Problem: Multi-hop adds latency
+- Insight: httpf proved cascade routing works for geographic and privacy routing
 
 ### Implementation
-- ✅ Attempt direct connection first (UDP hole punching)
-- ✅ Fall back to gateway only if direct fails
-- ✅ Automatically upgrade to direct when paths become available
-- ✅ Never route through gateway if direct path exists
+- ✅ Clients connect directly to nearest/preferred server
+- ✅ Servers forward inter-hub traffic via mesh tunnels
+- ✅ Cascade chains available for privacy/geo routing when needed
+- ✅ Connection migration via QUIC survives network changes
 
 ### Trade-Off
 **What we sacrifice:**
@@ -150,20 +152,22 @@ Multipath must work even if:
 
 ---
 
-## Principle 5: Zero-Config for Common Case
+## Principle 5: Simple Setup for Common Case
 
 ### Statement
-**90% of users should run one command and have a working network.**
+**Server: one config file. Client: one command to connect.**
 
 ### Rationale
 - Problem: OpenVPN requires pages of config
 - Problem: WireGuard requires manual key exchange
 - Insight: James (small business) won't use it if setup takes >1 hour
+- Insight: httpf proved single-binary server/client/bridge modes work
 
 ### Implementation
-- ✅ `quicether start` → auto-generates keys, discovers peers, establishes tunnels
-- ✅ Sensible defaults (security on, NAT traversal on, multipath on)
-- ✅ Advanced config available but not required
+- ✅ `quicether server --config server.toml` → server running with hubs
+- ✅ `quicether connect --server vpn.example.com` → connected client
+- ✅ Sensible defaults (security on, NAT enabled, TLS enforced)
+- ✅ Advanced config available in TOML but not required
 
 ### Trade-Off
 **What we sacrifice:**
@@ -171,22 +175,22 @@ Multipath must work even if:
 - Transparency (auto-config is "magic" to users)
 
 **Why this is acceptable:**
-- Can always override defaults with flags
+- Can always override defaults with config file
 - Advanced users (Alex, David) will read docs
 - Adoption > flexibility for most users
 
 ### Configuration Layers
 ```
-Layer 1: Zero-config (quicether start)
+Layer 1: Simple connect (quicether connect --server host)
   └─ Works for: Sarah, Maria (simple VPN)
 
-Layer 2: Simple flags (quicether start --interfaces eth0,eth1)
-  └─ Works for: James, Priya (multipath)
+Layer 2: Config file (quicether connect --config client.toml)
+  └─ Works for: James, Priya (multipath, split-tunnel)
 
-Layer 3: Config file (quicether start -c /etc/quicether.toml)
-  └─ Works for: Alex, David (advanced policies)
+Layer 3: Server config (quicether server --config server.toml)
+  └─ Works for: Alex, David (hubs, mesh, policies)
 
-Layer 4: API (quicether-daemon + quicether-cli)
+Layer 4: Admin API (REST endpoints for automation)
   └─ Works for: Enterprise automation
 ```
 
@@ -260,19 +264,25 @@ Metrics:
 ### Security Model
 ```
 Layer 1: Authentication (Who are you?)
-  └─ TLS 1.3 mutual auth, Ed25519 keys
+  └─ TLS 1.3 mutual auth, Ed25519 identity keys
+  └─ Argon2id password auth (legacy fallback)
+  └─ Service tokens (M2M / mesh / admin)
 
 Layer 2: Authorization (What can you access?)
-  └─ Policy engine: "node A can access subnet B"
+  └─ Hub-based namespacing with identity allowlists
+  └─ Firewall engine (Proxmox-style ACL)
+  └─ Policy engine: per-identity L3/L4 access control
 
 Layer 3: Confidentiality (Encrypt everything)
-  └─ TLS 1.3, AEAD ciphers (AES-GCM, ChaCha20-Poly1305)
+  └─ TLS 1.3 via QUIC (mandatory)
+  └─ Optional additional ChaCha20-Poly1305 per-packet encryption
 
 Layer 4: Integrity (Detect tampering)
   └─ AEAD provides authentication + encryption
 
 Layer 5: Audit (Who did what when?)
-  └─ Structured logs (JSON), exportable to SIEM
+  └─ Structured logs (JSONL), syslog (RFC 5424/3164)
+  └─ Per-event: identity, hub, IP, timestamp, reason
 ```
 
 ---
@@ -290,8 +300,9 @@ Layer 5: Audit (Who did what when?)
 ### Implementation
 - ✅ QUIC (RFC 9000) for transport
 - ✅ TLS 1.3 (RFC 8446) for encryption
-- ✅ Kademlia (academic paper) for DHT
 - ✅ STUN (RFC 5389) for NAT traversal
+- ✅ BLAKE3 for hashing (proven in httpf)
+- ✅ Ed25519 for identity (proven in httpf)
 
 ### Trade-Off
 **What we sacrifice:**
@@ -363,24 +374,35 @@ Scenario 4: Out of memory
 - Insight: Users need solutions today, not perfect solutions in 5 years
 
 ### Implementation
-- ✅ Ship MVP without blockchain (add later if needed)
-- ✅ Ship with simple scheduler (optimize later)
-- ✅ Ship Linux-only (port to other OSes later)
+- ✅ Ship MVP with proven httpf features ported to QUIC
+- ✅ Ship with proven schedulers from httpf (latency/balanced/throughput)
+- ✅ Ship Linux + macOS first (cross-platform from start)
 
 ### MVP Scope (Version 0.1)
 ```
-MUST HAVE:
-- Direct connections (UDP hole punching)
-- Gateway forwarding (fallback)
-- Multipath (basic round-robin)
-- Kademlia DHT (discovery)
-- TLS 1.3 (encryption)
-- CLI (quicether start/stop/status)
+MUST HAVE (proven in httpf, port to QUIC):
+- Server mode with hubs, IP pools, virtual NAT
+- Client mode with TUN device and split/full tunnel
+- Bridge mode (client + subnet advertisement)
+- Ed25519 identity auth + password auth + service tokens
+- Firewall engine (Proxmox-style ACL)
+- Policy engine (per-identity L3/L4 rules)
+- Rate limiting (token bucket)
+- Audit logging (JSONL, syslog)
+- Server mesh (server-to-server QUIC tunnels)
+- Cascade routing (multi-hop)
+- Admin REST API
+- Single binary (server/client/bridge/admin)
+- QUIC transport with TLS 1.3
+- Packet batching with LZ4 compression
+- ChaCha20-Poly1305 per-packet encryption
+- Performance profiles (latency/balanced/throughput/maxperformance)
 
 NICE TO HAVE (later):
+- QUIC native multipath (requires library support)
+- Mobile FFI (iOS/Android) — proven in httpf, port to QUIC
+- DHT discovery (for P2P extension)
 - Web UI (for monitoring)
-- Mobile apps (iOS/Android)
-- Blockchain (for persistent state)
 - Advanced schedulers (ML-based)
 - Kernel bypass (DPDK)
 ```
@@ -402,8 +424,8 @@ NICE TO HAVE (later):
 | Principle | What We Gain | What We Sacrifice | Why Worth It |
 |-----------|--------------|-------------------|--------------|
 | **User Sovereignty** | Control, privacy | Works in 100% of NAT cases | Control > convenience |
-| **Distributed** | Scale, resilience | Immediate consistency | Eventual consistency OK |
-| **Direct Connection** | Performance | Complexity | 10-100× faster |
+| **Server Mesh** | Scale, simplicity | Pure P2P | Proven > theoretical |
+| **Direct Connection** | Performance | Multi-hop latency | Direct > forwarded |
 | **Multi-Path** | Bandwidth aggregation | CPU/memory overhead | 2-10× throughput |
 | **Zero-Config** | Easy adoption | Control | Adoption > flexibility |
 | **Performance** | Line-rate | Portability | Enterprise needs it |
@@ -519,15 +541,15 @@ These principles are not aspirational—they are **constraints** that guide ever
 
 **Key Takeaways:**
 1. User sovereignty is non-negotiable
-2. Distributed > centralized
-3. Direct > gateway (always)
+2. Server mesh > pure DHT P2P (proven in httpf)
+3. Direct client-to-server preferred
 4. Multi-path is core, not optional
-5. Zero-config for 90%, advanced for 10%
+5. Simple setup: one config, one command
 6. Performance is a feature
-7. Security by default
+7. Security by default (three-tier auth, firewall, policy)
 8. Open standards > custom protocols
 9. Fail gracefully, never crash
-10. Ship MVP, iterate
+10. Ship proven features first, iterate
 
 **Next Chapter:** We'll translate these principles into a concrete high-level architecture.
 

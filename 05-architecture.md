@@ -8,11 +8,11 @@ This chapter translates the principles from Chapter 4 into a concrete system arc
 - Deployment models
 - Failure modes and recovery
 
-**Design Goals (from Chapter 4):**
-- Distributed (embedded DHT)
-- Direct connections preferred
-- Multi-path core feature
-- Zero-config for 90%
+**Design Goals (from Chapter 4, validated by httpf):**
+- Server mesh for distribution (proven in httpf)
+- Direct client-to-server QUIC connections
+- Multi-path core feature (proven in httpf via parallel paths)
+- Simple setup: one config, one command
 - 10-100 Gbps capable
 
 ---
@@ -22,207 +22,199 @@ This chapter translates the principles from Chapter 4 into a concrete system arc
 ### The 30-Second Explanation
 
 ```
-QuicEther = Single Binary + Embedded DHT + QUIC Transport + TUN Interface
+QuicEther = Single Binary + Server Mesh + QUIC Transport + TUN Interface
 
-User runs: quicether start
+Server mode: quicether server --config server.toml
   ↓
-1. Generate/load Ed25519 keypair (node identity)
+1. Load/generate Ed25519 identity
+2. Start QUIC listener (TLS 1.3)
+3. Initialize hubs (multi-tenant namespaces with IP pools)
+4. Accept client connections, assign IPs, create sessions
+5. Connect to mesh peers (other servers) via QUIC tunnels
+6. Route packets between clients, hubs, and mesh peers
+
+Client mode: quicether connect --server vpn.example.com
+  ↓
+1. Load/generate Ed25519 identity
 2. Create TUN interface (virtual network device)
-3. Start embedded Kademlia DHT (discovery)
-4. Bootstrap DHT by contacting public bootstrap nodes
-5. Discover peers via DHT
-6. Establish QUIC connections to peers (direct or via gateway)
-7. Route IP packets through TUN → QUIC tunnels
+3. Authenticate to server (Ed25519 / password / service token)
+4. Receive session config (assigned IP, DNS, routes)
+5. Route IP packets through TUN → QUIC tunnel to server
 ```
 
 ### The 5-Minute Architecture Diagram
 
-Rendered Mermaid diagram (see `diagrams/architecture.md` for source):
-
 ```mermaid
 graph TD
-    %% Top layer: Control plane
-    subgraph ControlPlane[Control Plane]
-        DHT["DHT Node (Kademlia)"]
-        BOOT["Bootstrap Nodes"]
-    end
-
-    %% Middle layer: Overlay fabric
-    subgraph OverlayFabric["QUIC Overlay Fabric"]
-        VNF["Virtual Network Fabric"]
-        MP["Multipath Manager"]
-    end
-
-    %% Bottom layer: Data plane per node
-    subgraph Node["QuicEther Node"]
-        DAEMON["quicether Daemon"]
-        TUN["TUN Interface"]
-        ROUTER["Overlay Router"]
+    subgraph Server["QuicEther Server"]
+        LISTENER["QUIC Listener (TLS 1.3)"]
+        AUTH["Auth Engine"]
+        HUB["Hub Manager"]
+        SESSION["Session Manager"]
+        NAT["Virtual NAT Router"]
+        FW["Firewall Engine"]
         POLICY["Policy Engine"]
-        METRICS["Metrics & Health"]
+        MESH["Mesh Manager"]
+        AUDIT["Audit Logger"]
     end
 
-    %% External networks
-    subgraph Underlay["Physical Networks"]
-        ISP1["ISP / WAN #1"]
-        ISP2["ISP / WAN #2"]
-        LAN["Local LAN / Wi-Fi"]
+    subgraph Client["QuicEther Client"]
+        TUN["TUN Interface"]
+        TRANSPORT["QUIC Transport"]
+        MP["Multipath Manager"]
+        ROUTER["Packet Router"]
     end
 
-    %% Relationships
-    BOOT --- DHT
-    DHT <--> VNF
+    subgraph MeshPeer["Mesh Peer Server"]
+        PEER_HUB["Peer Hubs"]
+    end
 
-    VNF <--> DAEMON
-    DAEMON --> MP
-    DAEMON --> ROUTER
-    ROUTER <--> TUN
-    DAEMON --> POLICY
-    DAEMON --> METRICS
+    TRANSPORT -->|QUIC| LISTENER
+    LISTENER --> AUTH
+    AUTH --> SESSION
+    SESSION --> HUB
+    HUB --> NAT
+    NAT --> FW
+    FW --> POLICY
+    TUN <--> ROUTER
+    ROUTER <--> TRANSPORT
+    MP --> TRANSPORT
+    MESH <-->|QUIC Tunnel| PEER_HUB
+    AUTH --> AUDIT
+    SESSION --> AUDIT
 
-    MP <--> ISP1
-    MP <--> ISP2
-    DAEMON <--> LAN
+    classDef server fill:#e3f2fd,stroke:#1e88e5;
+    classDef client fill:#e8f5e9,stroke:#43a047;
+    classDef peer fill:#fff3e0,stroke:#fb8c00;
 
-    %% Notes
-    classDef control fill:#e3f2fd,stroke:#1e88e5;
-    classDef overlay fill:#e8f5e9,stroke:#43a047;
-    classDef node fill:#fff3e0,stroke:#fb8c00;
-    classDef underlay fill:#f3e5f5,stroke:#8e24aa;
-
-    class ControlPlane,DHT,BOOT control;
-    class OverlayFabric,VNF,MP overlay;
-    class Node,DAEMON,TUN,ROUTER,POLICY,METRICS node;
-    class Underlay,ISP1,ISP2,LAN underlay;
+    class Server,LISTENER,AUTH,HUB,SESSION,NAT,FW,POLICY,MESH,AUDIT server;
+    class Client,TUN,TRANSPORT,MP,ROUTER client;
+    class MeshPeer,PEER_HUB peer;
 ```
 
-### Virtual Network Fabric Diagram
+### Hub-Based Multi-Tenancy Diagram
 
-This diagram emphasizes the virtual network fabric as a global overlay that each node’s virtual adapters plug into.
+This diagram shows how hubs provide network namespace isolation — each hub has its own IP pool, clients, and policies (proven essential in httpf).
 
 ```mermaid
 graph TD
-    %% Virtual Network Fabric focus
-
-    subgraph Fabric["Virtual Network Fabric (Global Overlay)"]
-        FABRIC["Virtual Network Fabric Core"]
+    subgraph Server["QuicEther Server"]
+        subgraph Hub1["Hub: office"]
+            POOL1["IP Pool: 10.100.0.0/24"]
+            C1["alice (10.100.0.2)"]
+            C2["bob (10.100.0.3)"]
+        end
+        subgraph Hub2["Hub: dev"]
+            POOL2["IP Pool: 10.200.0.0/24"]
+            C3["charlie (10.200.0.2)"]
+        end
+        VNAT["Virtual NAT Router"]
     end
 
-    subgraph NodeA["QuicEther Node A"]
-        VNA1["Virtual Network Adapter A1"]
-        VNA2["Virtual Network Adapter A2"]
-    end
-
-    subgraph NodeB["QuicEther Node B"]
-        VNB1["Virtual Network Adapter B1"]
-        VNB2["Virtual Network Adapter B2"]
-    end
-
-    subgraph NodeC["QuicEther Node C"]
-        VNC1["Virtual Network Adapter C1"]
-    end
-
-    %% Connections into the fabric
-    VNA1 --- FABRIC
-    VNA2 --- FABRIC
-    VNB1 --- FABRIC
-    VNB2 --- FABRIC
-    VNC1 --- FABRIC
-
-    %% Optional underlay links
-    subgraph UnderlayNet["Underlay Networks"]
-        U1["ISP / WAN Links"]
-        U2["LAN / Wi-Fi"]
-    end
-
-    FABRIC -. "QUIC Tunnels" .- U1
-    FABRIC -. "QUIC Tunnels" .- U2
+    C1 --> VNAT
+    C2 --> VNAT
+    C3 --> VNAT
 ```
 
 ---
 
 ## Component Architecture
 
-### Component 1: Control Plane (Discovery & Coordination)
+### Component 1: Server Core (Hub & Session Management)
 
-**Responsibility:** Find peers, exchange capabilities, establish trust.
+**Responsibility:** Accept clients, manage hubs, allocate IPs, enforce policies.
 
 **Sub-components:**
 
-#### 1.1 DHT (Kademlia)
+#### 1.1 Hub Manager (Multi-Tenant Namespacing)
 ```rust
-// Node identifier (160-bit hash of public key)
-type NodeId = [u8; 20];
+// Identity identifier (BLAKE3 hash of public key, truncated)
+type IdentityId = String;  // "qe_<blake3(pk)[..16]>"
 
-struct DHTNode {
-    node_id: NodeId,
-    public_key: Ed25519PublicKey,
-    routing_table: RoutingTable,  // 160 buckets
-    storage: HashMap<Key, Value>, // DHT storage
+struct Hub {
+    name: String,                          // "office", "dev", etc.
+    ip_pool: IpPool,                       // CIDR pool for IP allocation
+    allowed_identities: Option<Vec<IdentityId>>,  // None = open
+    dns_servers: Vec<IpAddr>,
+    mtu: u16,                              // Default 1400
+    firewall_rules: Vec<FirewallRule>,
+    policy_rules: Vec<PolicyRule>,
+    nat_enabled: bool,
+    sessions: HashMap<IdentityId, Session>,
 }
 
-// DHT Operations
-impl DHTNode {
-    fn find_node(&self, target: NodeId) -> Vec<NodeInfo>;
-    fn find_value(&self, key: &[u8]) -> Option<Vec<u8>>;
-    fn store(&mut self, key: &[u8], value: &[u8]);
-    fn ping(&self, node: NodeInfo) -> bool;
+struct IpPool {
+    network: IpNet,                // e.g., 10.100.0.0/24
+    gateway: IpAddr,               // e.g., 10.100.0.1 (server)
+    allocated: HashMap<IpAddr, IdentityId>,
+    lease_duration: Duration,
+}
+
+impl Hub {
+    fn allocate_ip(&mut self, identity: &IdentityId) -> Result<IpAddr>;
+    fn release_ip(&mut self, ip: IpAddr);
+    fn check_allowed(&self, identity: &IdentityId) -> bool;
 }
 ```
 
-**DHT Stores:**
-- Node metadata: `<node_id> → {public_key, listen_addrs, capabilities}`
-- Subnet advertisements: `<subnet_cidr> → {owner_node_id, ttl}`
-- Bootstrap nodes: Well-known public nodes for initial join
-
-**DHT Queries:**
-- "Who owns 10.0.0.0/24?" → Returns node_id
-- "What are node_id's addresses?" → Returns [IP:port, ...]
-- "Which nodes are near me?" → Returns k-nearest nodes
-
-#### 1.2 Bootstrap
+#### 1.2 Session Manager
 ```rust
-struct Bootstrap {
-    known_nodes: Vec<SocketAddr>,  // Public bootstrap nodes
+struct Session {
+    identity_id: IdentityId,
+    assigned_ip: IpAddr,
+    hub_name: String,
+    connected_at: Instant,
+    last_activity: Instant,
+    bytes_sent: u64,
+    bytes_recv: u64,
+    auth_method: AuthMethod,      // Ed25519, Password, ServiceToken
 }
 
-impl Bootstrap {
-    // Join DHT by contacting any bootstrap node
-    async fn join(&self) -> Result<Vec<NodeInfo>>;
+struct SessionManager {
+    sessions: HashMap<SessionId, Session>,
+    timeout: Duration,            // Idle session timeout
+}
+
+impl SessionManager {
+    async fn create_session(&mut self, identity: IdentityId, hub: &str) -> Result<Session>;
+    async fn keepalive(&mut self, session_id: &SessionId);
+    async fn expire_idle(&mut self);
+    fn get_session_by_ip(&self, ip: IpAddr) -> Option<&Session>;
 }
 ```
 
-**Bootstrap Flow:**
-```
-1. Read config: bootstrap_nodes = ["bootstrap.quicether.org:9000"]
-2. Contact any bootstrap node via UDP
-3. Bootstrap node returns 8-20 random DHT nodes
-4. New node sends FIND_NODE(self.node_id) to populate routing table
-5. New node is now part of DHT
-```
-
-**Bootstrap Nodes:**
-- Community-run (quicether.org)
-- User-deployed (private networks)
-- Cached from previous session (if available)
-
-#### 1.3 Peer Discovery
+#### 1.3 Mesh Manager (Server-to-Server)
 ```rust
-struct PeerDiscovery {
-    dht: DHTNode,
-    peers: HashMap<NodeId, PeerInfo>,
+struct MeshManager {
+    peers: Vec<MeshPeer>,
+    service_token: String,        // Auth token for mesh connections
 }
 
-impl PeerDiscovery {
-    // Discover peer by node_id
-    async fn discover(&self, node_id: NodeId) -> Result<PeerInfo>;
-    
-    // Discover all peers advertising a subnet
-    async fn discover_subnet(&self, cidr: IpNet) -> Vec<PeerInfo>;
-    
-    // Advertise our subnets to DHT
-    async fn advertise(&self, subnets: Vec<IpNet>);
+struct MeshPeer {
+    address: SocketAddr,
+    connection: Option<QuicConnection>,
+    status: MeshPeerStatus,       // Connected, Reconnecting, Failed
+    remote_hubs: Vec<HubInfo>,    // What hubs the peer has
+    reconnect_attempts: u32,
 }
+
+impl MeshManager {
+    async fn connect_to_peers(&mut self);
+    async fn forward_packet(&self, dest_ip: IpAddr, packet: &[u8]) -> Result<()>;
+    async fn auto_reconnect(&mut self);  // Exponential backoff
+}
+```
+
+**Mesh Flow:**
+```
+Server A (hub: "office", 10.100.0.0/24)
+  ↕ QUIC tunnel (service token auth)
+Server B (hub: "dev", 10.200.0.0/24)
+
+Client on Server A (10.100.0.2) sends packet to 10.200.0.3:
+1. Server A routing table: 10.200.0.0/24 → mesh peer B
+2. Forward packet through QUIC tunnel to Server B
+3. Server B delivers to client 10.200.0.3
 ```
 
 ---
@@ -265,99 +257,115 @@ Send via QUIC tunnel to appropriate peer
 #### 2.2 QUIC Transport
 ```rust
 struct QuicTransport {
-    endpoint: quinn::Endpoint,           // QUIC endpoint
-    connections: HashMap<NodeId, Connection>,
-    multipath_config: MultipathConfig,
+    endpoint: quinn::Endpoint,
+    server_connection: Option<Connection>,  // Client → Server
+    client_connections: HashMap<SessionId, Connection>,  // Server → Clients
+    mesh_connections: HashMap<PeerId, Connection>,       // Server → Mesh Peers
 }
 
 impl QuicTransport {
-    // Establish connection to peer
-    async fn connect(&mut self, peer: PeerInfo) -> Result<Connection>;
+    // Client: connect to server
+    async fn connect_to_server(&mut self, addr: SocketAddr) -> Result<Connection>;
     
-    // Accept incoming connection
-    async fn accept(&mut self) -> Result<Connection>;
+    // Server: accept incoming client
+    async fn accept_client(&mut self) -> Result<Connection>;
     
-    // Send packet to peer
-    async fn send(&mut self, node_id: NodeId, packet: &[u8]) -> Result<()>;
+    // Send packet batch (proven batching format from httpf)
+    async fn send_batch(&mut self, conn: &Connection, packets: &[Vec<u8>]) -> Result<()>;
     
-    // Receive packet from any peer
-    async fn recv(&mut self) -> Result<(NodeId, Vec<u8>)>;
+    // Receive packet batch
+    async fn recv_batch(&mut self, conn: &Connection) -> Result<Vec<Vec<u8>>>;
 }
 ```
 
 **QUIC Features Used:**
-- **0-RTT:** Reconnect to known peers instantly
+- **0-RTT:** Reconnect to known servers instantly
 - **Connection migration:** Survive IP changes (roaming)
-- **Multipath:** Multiple network interfaces simultaneously
-- **Stream multiplexing:** Control messages + data on same connection
+- **Native multipath:** Multiple network interfaces simultaneously (QUIC-level)
+- **Stream multiplexing:** Control stream + data streams on same connection
+- **Integrated TLS 1.3:** No separate TLS handshake needed
 
-#### 2.3 Packet Router
+#### 2.3 Virtual NAT Router (Server-Side)
 ```rust
-struct PacketRouter {
-    routing_table: RoutingTable,
-    tun: TunInterface,
-    transport: QuicTransport,
+struct VirtualNatRouter {
+    hubs: HashMap<String, Hub>,
+    mesh_peers: Vec<MeshPeer>,
+    firewall: FirewallEngine,
+    policy: PolicyEngine,
 }
 
-impl PacketRouter {
-    // Main packet forwarding loop
+impl VirtualNatRouter {
+    // Main packet forwarding loop (server-side)
+    async fn route_packet(&self, src_session: &Session, packet: &[u8]) -> Result<()> {
+        let dest_ip = extract_dest_ip(packet);
+        let src_ip = extract_src_ip(packet);
+        
+        // 1. Verify source IP matches session (anti-spoofing)
+        if src_ip != src_session.assigned_ip {
+            audit_log("spoofed_source", src_session);
+            return Err(Error::SpoofedSource);
+        }
+        
+        // 2. Check firewall rules
+        if !self.firewall.check(src_ip, dest_ip, packet) {
+            return Ok(()); // Silently drop
+        }
+        
+        // 3. Check policy rules
+        if !self.policy.check(&src_session.identity_id, dest_ip, packet) {
+            return Ok(()); // Drop per policy
+        }
+        
+        // 4. Route to destination
+        if let Some(local_session) = self.find_session_by_ip(dest_ip) {
+            // Destination is a local client — forward directly
+            local_session.send_packet(packet).await?;
+        } else if let Some(mesh_peer) = self.find_mesh_peer_for_ip(dest_ip) {
+            // Destination is on a mesh peer — forward through tunnel
+            mesh_peer.forward(packet).await?;
+        } else {
+            // No route — drop
+            return Err(Error::NoRoute);
+        }
+        
+        Ok(())
+    }
+}
+```
+
+#### 2.4 Client Packet Router
+```rust
+struct ClientRouter {
+    tun: TunInterface,
+    server_conn: QuicConnection,
+    routes: Vec<IpNet>,        // Routes pushed by server
+    split_tunnel: bool,        // If true, only VPN routes go through tunnel
+}
+
+impl ClientRouter {
     async fn run(&mut self) {
         loop {
             tokio::select! {
                 // Packet from TUN (outbound)
                 Ok(packet) = self.tun.read_packet() => {
                     let dest_ip = extract_dest_ip(&packet);
-                    let next_hop = self.routing_table.lookup(dest_ip);
-                    self.transport.send(next_hop, &packet).await?;
+                    if self.should_tunnel(dest_ip) {
+                        self.server_conn.send(&packet).await?;
+                    }
+                    // else: goes through normal OS routing
                 }
                 
-                // Packet from QUIC (inbound)
-                Ok((node_id, packet)) = self.transport.recv() => {
-                    let dest_ip = extract_dest_ip(&packet);
-                    if dest_ip == self.tun.local_addr {
-                        // For us, write to TUN
-                        self.tun.write_packet(&packet).await?;
-                    } else {
-                        // Forward to another peer
-                        let next_hop = self.routing_table.lookup(dest_ip);
-                        self.transport.send(next_hop, &packet).await?;
-                    }
+                // Packet from server (inbound)
+                Ok(packet) = self.server_conn.recv() => {
+                    self.tun.write_packet(&packet).await?;
                 }
             }
         }
     }
-}
-```
-
-#### 2.4 Routing Table
-```rust
-struct RoutingTable {
-    local_subnets: Vec<IpNet>,              // Subnets we own
-    peer_subnets: HashMap<IpNet, NodeId>,   // Peer → subnets they advertise
-    default_gateway: Option<NodeId>,        // For unknown destinations
-}
-
-impl RoutingTable {
-    fn lookup(&self, dest_ip: IpAddr) -> NodeId {
-        // 1. Check if dest is in local subnet
-        if self.local_subnets.iter().any(|net| net.contains(dest_ip)) {
-            return LOCAL;
-        }
-        
-        // 2. Check if any peer advertises subnet containing dest
-        for (subnet, node_id) in &self.peer_subnets {
-            if subnet.contains(dest_ip) {
-                return *node_id;
-            }
-        }
-        
-        // 3. Use default gateway if configured
-        if let Some(gateway) = self.default_gateway {
-            return gateway;
-        }
-        
-        // 4. Drop packet (no route)
-        DROP
+    
+    fn should_tunnel(&self, dest: IpAddr) -> bool {
+        if !self.split_tunnel { return true; }
+        self.routes.iter().any(|net| net.contains(&dest))
     }
 }
 ```
@@ -456,101 +464,185 @@ impl PathManager {
 
 ### Component 4: Security & Policy
 
-#### 4.1 Authentication
+#### 4.1 Three-Tier Authentication (Proven in httpf)
 ```rust
-struct NodeIdentity {
-    keypair: Ed25519Keypair,
-    node_id: NodeId,  // SHA-1(public_key)
+enum AuthMethod {
+    Identity(Ed25519PublicKey),    // Primary: Ed25519 keypair
+    Password { hash: Argon2Hash },// Legacy: Argon2id-hashed password
+    ServiceToken(String),          // M2M: For mesh, cascade, admin
 }
 
-// TLS 1.3 mutual authentication
-impl QuicTransport {
-    async fn authenticate(&self, conn: &Connection) -> Result<NodeId> {
-        // Extract peer's certificate (contains public key)
-        let peer_cert = conn.peer_identity()?;
-        let peer_pubkey = extract_pubkey(peer_cert)?;
-        let peer_node_id = compute_node_id(peer_pubkey);
-        
-        // Verify signature
-        verify_signature(peer_pubkey, conn.session_id())?;
-        
-        Ok(peer_node_id)
+struct Identity {
+    keypair: Ed25519Keypair,
+    identity_id: IdentityId,  // "qe_<blake3(public_key)[..16]>"
+}
+
+// Authentication flow
+impl AuthEngine {
+    async fn authenticate(&self, conn: &Connection, request: &ConnectRequest) -> Result<AuthResult> {
+        match &request.auth {
+            Auth::Identity { public_key, signature } => {
+                // Verify Ed25519 signature over challenge
+                verify_ed25519(public_key, &request.challenge, signature)?;
+                let id = format!("qe_{}", blake3_hex(&public_key)[..16]);
+                Ok(AuthResult::Authenticated(id))
+            }
+            Auth::Password { identity_id, password } => {
+                // Verify Argon2id password hash
+                let stored = self.password_store.get(identity_id)?;
+                argon2id_verify(&stored.hash, password)?;
+                Ok(AuthResult::Authenticated(identity_id.clone()))
+            }
+            Auth::ServiceToken { token } => {
+                // Verify against configured service tokens
+                if self.service_tokens.contains(token) {
+                    Ok(AuthResult::Service)
+                } else {
+                    Err(Error::InvalidToken)
+                }
+            }
+        }
     }
 }
 ```
 
-#### 4.2 Authorization (Policy Engine)
+#### 4.2 Firewall Engine (Proxmox-Style ACL)
 ```rust
-struct Policy {
+struct FirewallRule {
+    action: FirewallAction,       // Accept, Drop, Reject
+    direction: Direction,         // In, Out
+    source: Option<IpNet>,
+    dest: Option<IpNet>,
+    protocol: Option<Protocol>,   // TCP, UDP, ICMP
+    dport: Option<PortRange>,
+    comment: Option<String>,
+}
+
+enum FirewallAction { Accept, Drop, Reject }
+
+struct FirewallEngine {
+    rules: Vec<FirewallRule>,     // Ordered, first-match wins
+    default_action: FirewallAction,
+}
+
+impl FirewallEngine {
+    fn check(&self, src: IpAddr, dst: IpAddr, packet: &[u8]) -> bool {
+        let proto = extract_protocol(packet);
+        let dport = extract_dest_port(packet);
+        
+        for rule in &self.rules {
+            if rule.matches(src, dst, proto, dport) {
+                return matches!(rule.action, FirewallAction::Accept);
+            }
+        }
+        matches!(self.default_action, FirewallAction::Accept)
+    }
+}
+```
+
+**Example Firewall Config (TOML):**
+```toml
+[[hub.firewall]]
+action = "accept"
+direction = "in"
+protocol = "tcp"
+dport = "22,80,443"
+comment = "Allow SSH, HTTP, HTTPS"
+
+[[hub.firewall]]
+action = "accept"
+direction = "in"
+protocol = "icmp"
+comment = "Allow ping"
+
+[[hub.firewall]]
+action = "drop"
+direction = "in"
+comment = "Drop everything else"
+```
+
+#### 4.3 Policy Engine (Per-Identity Access Control)
+```rust
+struct PolicyRule {
+    identity: IdentityId,          // Who
+    target: IpNet,                 // Can access what subnet
+    ports: Option<Vec<PortRange>>, // On which ports
+    protocol: Option<Protocol>,    // TCP/UDP/ICMP
+    action: PolicyAction,          // Allow/Deny
+}
+
+struct PolicyEngine {
     rules: Vec<PolicyRule>,
 }
 
-struct PolicyRule {
-    subject: NodeId,        // Who
-    object: IpNet,          // Can access what
-    action: Action,         // Allow/Deny
-}
-
-enum Action {
-    Allow,
-    Deny,
-}
-
-impl Policy {
-    fn check(&self, node_id: NodeId, dest_ip: IpAddr) -> Action {
+impl PolicyEngine {
+    fn check(&self, identity: &IdentityId, dest_ip: IpAddr, packet: &[u8]) -> bool {
         for rule in &self.rules {
-            if rule.subject == node_id && rule.object.contains(dest_ip) {
-                return rule.action;
+            if rule.identity == *identity && rule.target.contains(&dest_ip) {
+                if rule.matches_port_proto(packet) {
+                    return matches!(rule.action, PolicyAction::Allow);
+                }
             }
         }
-        Action::Deny  // Default deny
+        true  // Default allow (firewall handles L3 blocking)
     }
 }
 ```
 
 **Example Policy:**
 ```toml
-[[policy.rules]]
-subject = "node_abc123"
-object = "10.0.1.0/24"
+[[hub.policies]]
+identity = "qe_abc123def456"
+target = "10.0.1.0/24"
+ports = [22, 80, 443]
 action = "allow"
 
-[[policy.rules]]
-subject = "node_xyz789"
-object = "10.0.0.0/16"
+[[hub.policies]]
+identity = "qe_xyz789abc012"
+target = "10.0.0.0/16"
 action = "deny"
 ```
 
-#### 4.3 Audit Logging
+#### 4.4 Audit Logging (Proven in httpf)
 ```rust
-struct AuditLog {
-    writer: Box<dyn Write>,
+struct AuditLogger {
+    file_writer: Option<BufWriter<File>>,    // JSONL file
+    syslog_writer: Option<SyslogWriter>,     // RFC 5424/3164
 }
 
-impl AuditLog {
-    fn log_connection(&mut self, event: ConnectionEvent) {
+impl AuditLogger {
+    fn log_event(&mut self, event: AuditEvent) {
         let record = json!({
             "timestamp": Utc::now().to_rfc3339(),
-            "event": "connection_established",
-            "peer_node_id": event.peer_node_id.to_string(),
-            "peer_addr": event.peer_addr.to_string(),
-            "duration_ms": event.duration.as_millis(),
+            "event": event.event_type,
+            "identity_id": event.identity_id,
+            "hub": event.hub_name,
+            "assigned_ip": event.assigned_ip,
+            "remote_addr": event.remote_addr,
+            "auth_method": event.auth_method,
+            "reason": event.reason,
         });
-        writeln!(self.writer, "{}", record).unwrap();
-    }
-    
-    fn log_packet(&mut self, src: NodeId, dest: IpAddr, size: usize) {
-        let record = json!({
-            "timestamp": Utc::now().to_rfc3339(),
-            "event": "packet_forwarded",
-            "src_node": src.to_string(),
-            "dest_ip": dest.to_string(),
-            "size_bytes": size,
-        });
-        writeln!(self.writer, "{}", record).unwrap();
+        
+        if let Some(ref mut writer) = self.file_writer {
+            writeln!(writer, "{}", record).ok();
+        }
+        if let Some(ref mut syslog) = self.syslog_writer {
+            syslog.send(&record);
+        }
     }
 }
 ```
+
+**Audit Events (all proven in httpf):**
+- `session_created` — client connected, IP assigned
+- `session_expired` — idle timeout or disconnect
+- `auth_failed` — invalid credentials
+- `rate_limited` — token bucket exhausted
+- `firewall_blocked` — packet dropped by ACL
+- `policy_denied` — packet denied by identity policy
+- `mesh_connected` — server mesh peer connected
+- `cascade_forwarded` — packet forwarded via cascade
+- `admin_action` — REST API admin operation
 
 ---
 
@@ -619,123 +711,106 @@ async fn health_handler() -> impl Reply {
 }
 ```
 
-#### 5.3 CLI (Management Interface)
+#### 5.3 CLI (Management Interface — httpf-style)
 ```bash
-# Start daemon
-quicether start
+# Server mode
+quicether server --config /etc/quicether/server.toml
 
-# Status
-quicether status
-# Output:
-# Node ID: abc123def456
-# TUN Interface: quicether0 (100.64.0.1)
-# Connected Peers: 5
-# Active Paths: 2 (eth0, wlan0)
+# Client mode
+quicether connect --server vpn.example.com --hub office
 
-# List peers
-quicether peers
-# Output:
-# NodeID          | Address           | RTT   | Status
-# xyz789          | 203.0.113.5:9000  | 15ms  | Connected
-# def456          | 198.51.100.1:9000 | 120ms | Connected (gateway)
+# Bridge mode (client + subnet advertisement)
+quicether bridge --server vpn.example.com --hub office --advertise 192.168.1.0/24
 
-# Show routes
-quicether routes
+# Identity management
+quicether identity generate
+quicether identity show
 # Output:
-# Destination     | Next Hop  | Interface
-# 10.0.0.0/16     | xyz789    | Direct
-# 10.1.0.0/16     | def456    | Gateway
+# Identity ID: qe_a1b2c3d4e5f6g7h8
+# Public Key:  MCowBQYDK2VwAyEA...
+# Fingerprint: SHA256:xK3d...
 
-# Show multipath stats
-quicether multipath
+# Hub management (admin)
+quicether hub list --server vpn.example.com
+quicether hub create --name dev --cidr 10.200.0.0/24
+
+# Session management
+quicether session list --server vpn.example.com
 # Output:
-# Interface | Address         | RTT   | Bandwidth | Packets | Status
-# eth0      | 192.168.1.5     | 10ms  | 500 Mbps  | 1.2M    | Active
-# wlan0     | 192.168.2.10    | 35ms  | 200 Mbps  | 450K    | Active
+# Identity          | Hub    | IP          | Connected | Bytes
+# qe_a1b2c3d4e5f6   | office | 10.100.0.2  | 2h 15m    | 1.2 GB
+# qe_x9y8z7w6v5u4   | dev    | 10.200.0.3  | 45m       | 340 MB
+
+# Admin operations
+quicether admin disconnect --identity qe_a1b2c3d4 --server vpn.example.com
+quicether audit --server vpn.example.com --last 100
 ```
 
 ---
 
 ## Data Flow Examples
 
-### Example 1: Direct Connection (Common Case)
+### Example 1: Client-to-Client via Server (Common Case)
 
 ```
-Scenario: Sarah's laptop (100.64.0.1) pings home server (100.64.0.2)
+Scenario: Alice (10.100.0.2) pings Bob (10.100.0.3), both on hub "office"
 
-1. Sarah's laptop:
-   ping 100.64.0.2
+1. Alice's laptop:
+   ping 10.100.0.3
    ↓
    Kernel routes to quicether0 TUN
    ↓
-   QuicEther reads ICMP packet from TUN
+   QuicEther client reads ICMP packet from TUN
    ↓
-   Routing table lookup: 100.64.0.2 → node_xyz789
-   ↓
-   QUIC: Send packet on existing connection to node_xyz789
-   ↓
-   UDP: 192.168.1.5:9000 → 203.0.113.5:9000 (direct)
+   Send via QUIC tunnel to server
 
-2. Home server:
-   Receive UDP packet
+2. Server (Virtual NAT Router):
+   Receive packet from Alice's session
    ↓
-   QUIC decryption
+   Anti-spoof check: src=10.100.0.2, session IP=10.100.0.2 ✓
    ↓
-   Extract ICMP packet
+   Firewall check: ICMP allowed ✓
+   ↓
+   Policy check: Alice → 10.100.0.3 allowed ✓
+   ↓
+   Routing: 10.100.0.3 → Bob's session (same hub)
+   ↓
+   Forward packet to Bob via QUIC
+
+3. Bob's laptop:
+   Receive packet from server
    ↓
    Write to TUN (quicether0)
    ↓
-   Kernel delivers to ICMP handler
+   Kernel delivers ICMP reply back through same path
    ↓
-   Generate ICMP reply
-   ↓
-   Kernel routes reply to quicether0
-   ↓
-   QuicEther reads reply, sends via QUIC back to Sarah
-
-3. Sarah's laptop:
-   Receive ICMP reply
-   ↓
-   Write to TUN
-   ↓
-   Kernel delivers to ping process
-   ↓
-   ping displays: "64 bytes from 100.64.0.2: icmp_seq=1 ttl=64 time=15.2 ms"
+   Alice sees: "64 bytes from 10.100.0.3: time=15.2 ms"
 ```
 
-### Example 2: Gateway Forwarding (NAT Scenario)
+### Example 2: Cross-Hub via Server Mesh
 
 ```
-Scenario: Alex's home server (behind NAT) ← Maria's laptop (behind NAT)
-Both behind symmetric NAT, direct connection fails.
-Alex has gateway node in cloud.
+Scenario: Alice on Server A (hub "office") accesses Charlie on Server B (hub "dev")
+Servers A and B are mesh peers.
 
-1. Maria's laptop:
-   ssh 100.64.0.5 (Alex's home server)
+1. Alice's client:
+   ssh 10.200.0.2 (Charlie on Server B)
    ↓
-   Routing table: 100.64.0.5 → node_alex_home
-   ↓
-   Connection state: node_alex_home → GATEWAY_REQUIRED
-   ↓
-   Query DHT: "Which gateway forwards for node_alex_home?"
-   ↓
-   DHT returns: node_cloud_gateway
-   ↓
-   QUIC: Send packet to node_cloud_gateway with header "forward to node_alex_home"
+   QUIC tunnel → Server A
 
-2. Gateway node:
-   Receive packet from Maria
+2. Server A:
+   Routing table: 10.200.0.0/24 → mesh peer Server B
    ↓
-   Check policy: "Can Maria access Alex's network?" → Yes
-   ↓
-   Forward packet to node_alex_home via existing QUIC connection
+   Forward packet through QUIC mesh tunnel → Server B
 
-3. Alex's home server:
-   Receive packet from gateway
+3. Server B:
+   Receive from mesh tunnel
    ↓
-   Process normally (write to TUN)
+   Route to Charlie's session (10.200.0.2)
    ↓
-   Reply goes back through gateway to Maria
+   Forward to Charlie via QUIC
+
+4. Reply follows reverse path: Charlie → Server B → mesh → Server A → Alice
 ```
 
 ### Example 3: Multi-Path Aggregation
@@ -784,141 +859,143 @@ Scenario: Priya downloads 10 GB file using 4 ISPs
 
 ```
 Topology:
-  Laptop (roaming) ←→ Home Server (fixed)
+  Laptop (roaming) ←→ Server (cloud or home, $5/month VPS)
 
 Configuration:
-  # Home Server
-  quicether start --advertise-subnet 192.168.1.0/24
+  # Server (cloud VPS or home server with public IP)
+  quicether server --config server.toml
+  # server.toml:
+  # [server]
+  # listen = "0.0.0.0:9443"
+  # [[hubs]]
+  # name = "personal"
+  # cidr = "10.100.0.0/24"
   
   # Laptop
-  quicether start --peer-allow home-server
+  quicether connect --server vpn.example.com --hub personal
 
 Behavior:
-  - Laptop auto-discovers home server via DHT
-  - Direct connection (both behind consumer NAT, hole-punching works)
-  - Laptop can access 192.168.1.0/24 (home network)
+  - Client connects to server via QUIC
+  - Server assigns IP from hub pool
+  - All traffic tunneled through server (or split-tunnel)
+  - Connection survives network changes (QUIC migration)
 ```
 
 ### Model 2: Homelab Mesh (Alex)
 
 ```
 Topology:
-  Home Server ←→ Colo Gateway ←→ Cloud VM
-            ↘         ↓         ↙
-              Remote Laptop
+  Server A (home) ←mesh→ Server B (colo) ←mesh→ Server C (cloud)
+                            ↑
+                        Laptop connects
 
 Configuration:
-  # Home Server (behind NAT)
-  quicether start --advertise-subnet 192.168.1.0/24
+  # Home Server (behind NAT, port-forwarded or UPnP)
+  quicether server --config server-home.toml
+  # hubs: [{ name = "homelab", cidr = "10.100.0.0/24" }]
+  # mesh_peers: [{ address = "colo.example.com:9443", token = "..." }]
   
-  # Colo Gateway (public IP)
-  quicether start --role gateway --public-ip 203.0.113.5
-  
-  # Cloud VM (public IP)
-  quicether start --bootstrap-mode --public-ip 150.230.1.1
+  # Colo Server (public IP)
+  quicether server --config server-colo.toml
+  # hubs: [{ name = "colo", cidr = "10.200.0.0/24" }]
+  # mesh_peers: [{ address = "home.example.com:9443", token = "..." }]
   
   # Laptop
-  quicether start
+  quicether connect --server colo.example.com --hub colo
 
 Behavior:
-  - All nodes discover each other via DHT
-  - Home ↔ Colo: Direct (Colo has public IP)
-  - Home ↔ Cloud: Direct (hole-punching)
-  - Home ↔ Laptop: May need gateway (depends on NAT)
-  - Colo acts as gateway when direct fails
+  - All servers form mesh via QUIC tunnels
+  - Client connects to colo, can reach home via mesh
+  - Automatic mesh routing between subnets
 ```
 
 ### Model 3: Small Business (James)
 
 ```
 Topology:
-  Office 1 (HQ) ←→ Office 2 (Branch) ←→ Remote Workers
+  Server (office, 2 ISPs) ←→ Remote Workers
 
 Configuration:
-  # Office 1 (2 ISPs)
-  quicether start \
-    --advertise-subnet 10.0.0.0/16 \
-    --interfaces eth0,eth1 \
-    --multipath aggregate
-  
-  # Office 2 (2 ISPs)
-  quicether start \
-    --advertise-subnet 10.1.0.0/16 \
-    --interfaces eth0,eth1 \
-    --multipath aggregate
+  # Office Server (2 ISPs for redundancy)
+  quicether server --config server.toml
+  # [server]
+  # listen = "0.0.0.0:9443"
+  # [[hubs]]
+  # name = "office"
+  # cidr = "10.0.0.0/24"
+  # allowed_identities = ["qe_alice...", "qe_bob...", "qe_charlie..."]
   
   # Remote Workers
-  quicether start
+  quicether connect --server office.example.com --hub office
 
 Behavior:
-  - Offices use multipath (2 ISPs each)
-  - Remote workers connect to either office for resource access
-  - If Office 1 ↔ Office 2 direct fails, use remote worker as relay (emergency)
+  - Identity allowlist controls who can connect
+  - Firewall rules control what clients can access
+  - Audit logging for compliance
+  - Workers see office network as local
 ```
 
 ### Model 4: Multi-ISP Aggregation (Priya)
 
 ```
 Topology:
-  Desktop (4 ISPs) ←→ Cloud Gateway
+  Desktop (4 ISPs) ←multipath→ Cloud Server
 
 Configuration:
   # Desktop (4 network interfaces)
-  quicether start \
-    --interfaces eth0,eth1,wwan0,sat0 \
-    --multipath aggregate \
-    --scheduler weighted
-  
-  # Cloud Gateway (cheap VM, $5/month)
-  quicether start --role gateway --accept-multipath
+  quicether connect \
+    --server cloud.example.com \
+    --hub aggregate \
+    --performance maxperformance \
+    --multipath
+
+  # Cloud Server ($5/month, 1 Gbps upstream)
+  quicether server --config server.toml
+  # [[hubs]]
+  # name = "aggregate"
+  # cidr = "10.100.0.0/24"
 
 Behavior:
-  - Desktop aggregates all 4 ISPs
-  - Cloud gateway has good upstream (1 Gbps)
-  - All internet traffic routed through cloud gateway
-  - Achieves 225 Mbps aggregate vs 100 Mbps (Starlink alone)
+  - Client aggregates all 4 ISPs via QUIC multipath
+  - All traffic exits through cloud server
+  - Achieves ~200 Mbps aggregate vs 100 Mbps single path
 ```
 
 ### Model 5: Enterprise (David)
 
 ```
 Topology:
-  HQ ←→ Factory ←→ Warehouse
-   ↓       ↓         ↓
-  Remote Workers
+  Server-HQ ←mesh→ Server-Factory ←mesh→ Server-Warehouse
+       ↑                  ↑                   ↑
+   HQ Workers       Factory Workers     Warehouse Workers
 
 Configuration:
-  # HQ (New York)
-  quicether start \
-    --enterprise \
-    --advertise-subnet 10.0.0.0/16 \
-    --bootstrap-mode \
-    --interfaces eth0,eth1 \
-    --policy /etc/quicether/policy.toml \
-    --audit-log /var/log/quicether/audit.json
+  # HQ Server (New York)
+  quicether server --config server-hq.toml
+  # [[hubs]]
+  # name = "hq"
+  # cidr = "10.0.0.0/24"
+  # [mesh]
+  # peers = [
+  #   { address = "factory.example.com:9443", token = "..." },
+  #   { address = "warehouse.example.com:9443", token = "..." },
+  # ]
+  # [audit]
+  # file = "/var/log/quicether/audit.jsonl"
+  # syslog = "udp://siem.example.com:514"
   
-  # Factory (Ohio)
-  quicether start \
-    --enterprise \
-    --advertise-subnet 10.1.0.0/16 \
-    --interfaces eth0,eth1,eth2 \
-    --policy /etc/quicether/policy.toml
-  
-  # Warehouse (Texas)
-  quicether start \
-    --enterprise \
-    --advertise-subnet 10.2.0.0/16 \
-    --policy /etc/quicether/policy.toml
+  # Factory Server (Ohio)
+  quicether server --config server-factory.toml
+  # Similar config with factory hub
   
   # Remote Workers
-  quicether start --require-2fa
+  quicether connect --server hq.example.com --hub hq
 
 Behavior:
-  - All sites auto-discover via DHT
-  - HQ acts as bootstrap (well-known)
-  - Policy engine enforces access control
-  - All connections logged for audit (SOC 2 compliance)
-  - Multi-path at HQ and Factory for resilience
+  - All sites form mesh, cross-site routing automatic
+  - Policy engine controls per-identity access
+  - All events logged for SOC 2 compliance
+  - Rate limiting prevents abuse
 ```
 
 ---
@@ -948,96 +1025,74 @@ PathMonitor detects:
 
 **User Impact:** None (transparent failover)
 
-### Failure 2: Direct Connection Fails
+### Failure 2: Server Connection Lost
 
-**Scenario:** Sarah's laptop roams to hotel WiFi with symmetric NAT
+**Scenario:** Sarah's client loses connection to server (server reboot, network issue)
 
 **Detection:**
 ```
-- Attempt direct connection (UDP hole-punching)
-- Timeout after 30 seconds
-- Connection state: DIRECT_FAILED
+- QUIC keepalive timeout
+- Connection state: DISCONNECTED
 ```
 
 **Recovery:**
 ```
-1. Query DHT: "Which gateways can forward to home-server?"
-2. DHT returns: No gateways configured
-3. Connection fails
-4. Log: "Direct failed, no gateway available"
-5. Notify user: "Cannot connect (both behind NAT, no gateway)"
+1. Client enters reconnect mode (proven in httpf)
+2. Exponential backoff: 1s, 2s, 4s, 8s, ... max 60s
+3. On reconnect:
+   - Re-authenticate (0-RTT if session cached)
+   - Request same IP from hub pool
+   - Resume traffic
+4. If server unreachable after max retries:
+   - Log: "Server unreachable, retrying..."
+   - Continue retry loop indefinitely
 ```
 
-**User Options:**
-```bash
-# Option 1: Deploy gateway
-# On cheap cloud VM ($5/month):
-quicether start --role gateway --public-ip <cloud-ip>
+**User Impact:** Brief interruption, automatic recovery
 
-# On home server:
-quicether config set --gateway-prefer <gateway-node-id>
+### Failure 3: Mesh Peer Disconnected
 
-# Option 2: Use friend's gateway
-quicether config set --gateway-allow <friend-gateway-node-id>
-```
-
-### Failure 3: DHT Partitioned
-
-**Scenario:** Network split (some nodes can't reach others)
+**Scenario:** Server B in mesh goes offline (crash, network partition)
 
 **Detection:**
 ```
-- Node A can't find Node B in DHT
-- FIND_NODE queries timeout
-- Routing table has no entries for Node B's bucket
+- QUIC tunnel to Server B: keepalive timeout
+- Mesh peer status: DISCONNECTED
 ```
 
 **Recovery:**
 ```
-1. If Node A knows Node B's IP from cache:
-   → Attempt direct connection (bypass DHT)
-   
-2. If connection succeeds:
-   → Continue using connection
-   → Log: "DHT partitioned, using cached peer info"
-   
-3. If connection fails:
-   → Mark Node B as unreachable
-   → Wait for DHT to heal (retry every 60 seconds)
+1. Mark mesh peer as disconnected
+2. Packets to Server B's subnets: drop with ICMP unreachable
+3. Auto-reconnect with exponential backoff (proven in httpf)
+4. When reconnected:
+   - Re-authenticate with service token
+   - Exchange hub/subnet info
+   - Resume cross-site routing
 ```
 
-**User Impact:** Connections to known peers continue, new discovery delayed
+**User Impact:** Cross-site traffic interrupted, same-site traffic unaffected
 
-### Failure 4: Gateway Node Dies
+### Failure 4: Hub IP Pool Exhausted
 
-**Scenario:** Alex's colo gateway VM crashes
+### Failure 4: Hub IP Pool Exhausted
+
+**Scenario:** Hub "office" has 10.100.0.0/24 (254 addresses) and all are allocated
 
 **Detection:**
 ```
-- Connections through gateway timeout
-- Health checks to gateway fail
-- DHT still lists gateway (TTL not expired)
+- New client connects, hub.allocate_ip() returns Err(PoolExhausted)
 ```
 
 **Recovery:**
 ```
-1. Mark gateway as unhealthy
-2. Attempt direct connection to end peer
-   → If succeeds: Use direct (upgrade!)
-   → If fails: Look for alternate gateway in DHT
-3. If alternate gateway found:
-   → Establish connection through alternate
-4. If no alternate:
-   → Connection fails, notify user
+1. Reject connection with clear error: "Hub 'office' IP pool exhausted"
+2. Admin action: expand pool or clean expired sessions
+3. Automatic: expire idle sessions (no keepalive in timeout period)
+4. Alternative: configure larger CIDR (e.g., /16)
 ```
 
-**User Action:**
-```bash
-# Deploy new gateway
-quicether start --role gateway --public-ip <new-ip>
-
-# Nodes automatically discover new gateway via DHT
-```
+**User Impact:** New connections rejected, existing connections unaffected
 
 ### Failure 5: Node Runs Out of Memory
 
@@ -1118,130 +1173,154 @@ quicether start --role gateway --public-ip <new-ip>
 
 | Metric | MVP (v0.1) | Target (v1.0) |
 |--------|-----------|---------------|
-| Connections per node | 1,000 | 10,000 |
-| DHT nodes in network | 10,000 | 1,000,000 |
-| Routing table entries | 1,000 | 100,000 |
+| Sessions per server | 1,000 | 10,000 |
+| Hubs per server | 10 | 100 |
+| Mesh peers per server | 10 | 50 |
 | Packet rate (pps) | 100,000 | 1,000,000 |
-| Throughput (single node) | 10 Gbps | 100 Gbps |
+| Throughput (single server) | 10 Gbps | 100 Gbps |
 
 ---
 
 ## Configuration Examples
 
-### Minimal (Zero-Config)
+### Minimal Client
 
 ```bash
-quicether start
+quicether connect --server vpn.example.com
 ```
 
 **Behavior:**
-- Auto-generates Ed25519 keypair
-- Creates TUN interface (quicether0)
-- Allocates IP from 100.64.0.0/16 (CGNAT range)
-- Discovers bootstrap nodes from DNS (bootstrap.quicether.org)
-- Joins DHT
-- Ready to discover and connect to peers
+- Auto-generates Ed25519 identity (if none exists)
+- Connects to server via QUIC (TLS 1.3)
+- Authenticates with identity key
+- Receives IP assignment, creates TUN interface
+- Routes traffic through tunnel
 
-### Personal VPN
+### Minimal Server
 
 ```toml
-# ~/.config/quicether/config.toml
+# /etc/quicether/server.toml
 
-[node]
-name = "laptop"
+[server]
+listen = "0.0.0.0:9443"
 
-[network]
-tun_name = "quicether0"
-tun_addr = "100.64.0.1/16"
+[[hubs]]
+name = "default"
+cidr = "10.100.0.0/24"
+```
 
-[discovery]
-bootstrap_nodes = [
-    "home-server.local:9000",
-    "bootstrap.quicether.org:9000"
+### Personal VPN Client
+
+```toml
+# ~/.config/quicether/client.toml
+
+[client]
+server = "vpn.example.com:9443"
+hub = "personal"
+split_tunnel = false    # Full tunnel
+
+[performance]
+profile = "balanced"
+
+[identity]
+key_file = "~/.config/quicether/identity.key"
+```
+
+### Multi-Path Client
+
+```toml
+[client]
+server = "vpn.example.com:9443"
+hub = "aggregate"
+
+[multipath]
+enabled = true
+
+[performance]
+profile = "maxperformance"
+```
+
+### Enterprise Server (Full Configuration)
+
+```toml
+[server]
+listen = "0.0.0.0:9443"
+
+[identity]
+key_file = "/etc/quicether/server.key"
+
+[[hubs]]
+name = "office"
+cidr = "10.0.0.0/24"
+dns = ["10.0.0.1", "8.8.8.8"]
+mtu = 1400
+allowed_identities = ["qe_alice...", "qe_bob..."]
+
+[[hubs.firewall]]
+action = "accept"
+direction = "in"
+protocol = "tcp"
+dport = "22,80,443"
+
+[[hubs.firewall]]
+action = "drop"
+direction = "in"
+
+[[hubs.policies]]
+identity = "qe_alice..."
+target = "10.0.0.0/24"
+action = "allow"
+
+[mesh]
+peers = [
+    { address = "factory.example.com:9443", token = "mesh-secret-token" },
 ]
 
-[peers]
-# Allow only specific peers
-allowed = ["node_abc123", "node_xyz789"]
-```
+[rate_limit]
+packets_per_second = 10000
+burst = 50000
 
-### Multi-Path Aggregation
-
-```toml
-[multipath]
-enabled = true
-interfaces = ["eth0", "eth1", "wwan0"]
-scheduler = "weighted"
-
-[multipath.weights]
-eth0 = 1.0  # DSL, 25 Mbps
-eth1 = 2.0  # Cable, 50 Mbps
-wwan0 = 2.0 # LTE, 50 Mbps
-```
-
-### Enterprise (Full Configuration)
-
-```toml
-[node]
-name = "hq-gateway"
-role = "gateway"
-
-[network]
-tun_name = "quicether0"
-tun_addr = "10.0.0.1/16"
-advertise_subnets = ["10.0.0.0/16"]
-
-[discovery]
-bootstrap_mode = true
-public_ip = "198.51.100.5"
-dht_port = 9000
-
-[multipath]
-enabled = true
-interfaces = ["eth0", "eth1"]
-mode = "failover"  # Not aggregate, just redundancy
-
-[security]
-policy_file = "/etc/quicether/policy.toml"
-audit_log = "/var/log/quicether/audit.json"
-require_2fa = false
+[audit]
+file = "/var/log/quicether/audit.jsonl"
+syslog_address = "udp://siem.example.com:514"
+syslog_format = "rfc5424"
 
 [monitoring]
 metrics_addr = "127.0.0.1:9090"
 health_addr = "127.0.0.1:9091"
 log_level = "info"
-
-[performance]
-io_backend = "io_uring"  # Linux only
-cpu_affinity = [0, 1, 2, 3]  # Pin to CPUs 0-3
 ```
 
 ---
 
 ## Summary
 
-**Key Architectural Decisions:**
+**Key Architectural Decisions (validated by httpf):**
 
-1. **Single Binary:** Everything in one executable (DHT + QUIC + TUN)
-2. **Embedded DHT:** Kademlia for discovery, no separate server
-3. **QUIC Transport:** TLS 1.3 + multipath + 0-RTT + migration
+1. **Single Binary:** Server/client/bridge/admin all in one executable
+2. **Hub-Based Multi-Tenancy:** Namespaced IP pools with firewall + policy per hub
+3. **QUIC Transport:** TLS 1.3 + native multipath + 0-RTT + migration
 4. **TUN Interface:** Kernel integration for IP routing
-5. **Direct Preferred:** Always try direct, gateway is fallback
-6. **Multi-Path Core:** Not optional, foundational feature
-7. **Policy Engine:** Zero-trust authorization built-in
-8. **Observable:** Metrics (Prometheus) + Logs (JSON) + Health checks
+5. **Server Mesh:** Server-to-server QUIC tunnels for distributed topology
+6. **Three-Tier Auth:** Ed25519 identity + Argon2id password + service tokens
+7. **Virtual NAT Router:** Server-side IP allocation, anti-spoofing, forwarding
+8. **Firewall + Policy:** Proxmox-style ACL + per-identity L3/L4 rules
+9. **Audit Logging:** JSONL + syslog for compliance
+10. **Observable:** Metrics (Prometheus) + Health checks
 
 **Component Summary:**
 
 | Component | Technology | Responsibility |
 |-----------|-----------|----------------|
-| Control Plane | Kademlia DHT | Peer discovery |
+| Server Core | Hub + Session Manager | Client management, IP allocation |
 | Data Plane | QUIC + TUN | Packet forwarding |
-| Multi-Path | Custom scheduler | Aggregate bandwidth |
-| Security | TLS 1.3 + Policy | Authentication + Authorization |
-| Management | HTTP API | Metrics + Health |
+| Mesh | QUIC tunnels + routing | Server-to-server forwarding |
+| Multi-Path | QUIC multipath | Aggregate bandwidth |
+| Security | TLS 1.3 + Firewall + Policy | Auth + ACL + access control |
+| Audit | JSONL + Syslog | Event logging |
+| Management | REST API + CLI | Admin operations |
 
-**Next Chapter:** We'll dive into technology choices and trade-offs (why QUIC vs WireGuard, why Kademlia vs Gossip, etc.).
+**Next Chapter:** We'll dive into technology choices and trade-offs (why QUIC over WireGuard, why BLAKE3, why server mesh over DHT, etc.).
 
 ---
 

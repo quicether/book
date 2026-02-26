@@ -1,126 +1,173 @@
+# QuicEther Architecture Diagrams
+
+> **Post-httpf Revision:** These diagrams reflect the validated hub-based,
+> server mesh architecture ported from HTTP Fabric to native QUIC.
+
+## Diagram 1: System Architecture
+
 ```mermaid
 graph TD
-    %% Top layer: Control plane
-    subgraph ControlPlane[Control Plane]
-        DHT["DHT Node (Kademlia)"]
-        BOOT["Bootstrap Nodes"]
+    %% Server layer
+    subgraph Server["QuicEther Server"]
+        QUIC["QUIC Listener (TLS 1.3)"]
+        AUTH["Auth Service<br/>(Ed25519 / Password / Token)"]
+        HUB["Hub Manager<br/>(Multi-tenant IP Pools)"]
+        FW["Firewall Engine<br/>(Proxmox-style)"]
+        ROUTER["Router + Virtual NAT"]
+        AUDIT["Audit Logger<br/>(JSONL + Syslog)"]
+        MESH["Mesh Manager<br/>(Cascade Routing)"]
+        TUN_S["TUN Interface"]
     end
 
-    %% Middle layer: Overlay fabric
-    subgraph OverlayFabric["QUIC Overlay Fabric"]
-        VNF["Virtual Network Fabric"]
+    %% Client layer
+    subgraph Client["QuicEther Client"]
+        CONN["QUIC Connection"]
         MP["Multipath Manager"]
+        PERF["Performance Profile<br/>(latency/balanced/throughput)"]
+        TUN_C["TUN Interface"]
     end
 
-    %% Bottom layer: Data plane per node
-    subgraph Node["QuicEther Node"]
-        DAEMON["quicether Daemon"]
-        TUN["TUN Interface"]
-        ROUTER["Overlay Router"]
-        POLICY["Policy Engine"]
-        METRICS["Metrics & Health"]
-    end
-
-    %% External networks
+    %% Physical networks
     subgraph Underlay["Physical Networks"]
         ISP1["ISP / WAN #1"]
-        ISP2["ISP / WAN #2"]
-        LAN["Local LAN / Wi-Fi"]
+        ISP2["ISP / WAN #2 (failover)"]
     end
 
-    %% Relationships
-    BOOT --- DHT
-    DHT <--> VNF
-
-    VNF <--> DAEMON
-    DAEMON --> MP
-    DAEMON --> ROUTER
-    ROUTER <--> TUN
-    DAEMON --> POLICY
-    DAEMON --> METRICS
-
+    %% Client to server flow
+    TUN_C -->|"IP packets"| CONN
+    CONN -->|"PacketBatch (LZ4 + ChaCha20)"| MP
     MP <--> ISP1
     MP <--> ISP2
-    DAEMON <--> LAN
+    ISP1 & ISP2 -->|"QUIC streams"| QUIC
+    QUIC --> AUTH
+    AUTH --> HUB
+    HUB --> FW
+    FW --> ROUTER
+    ROUTER <--> TUN_S
+    ROUTER --> AUDIT
+    HUB --> MESH
 
-    %% Notes
-    classDef control fill:#e3f2fd,stroke:#1e88e5;
-    classDef overlay fill:#e8f5e9,stroke:#43a047;
-    classDef node fill:#fff3e0,stroke:#fb8c00;
+    %% Styling
+    classDef server fill:#e3f2fd,stroke:#1e88e5;
+    classDef client fill:#e8f5e9,stroke:#43a047;
     classDef underlay fill:#f3e5f5,stroke:#8e24aa;
 
-    class ControlPlane,DHT,BOOT control;
-    class OverlayFabric,VNF,MP overlay;
-    class Node,DAEMON,TUN,ROUTER,POLICY,METRICS node;
-    class Underlay,ISP1,ISP2,LAN underlay;
+    class Server,QUIC,AUTH,HUB,FW,ROUTER,AUDIT,MESH,TUN_S server;
+    class Client,CONN,MP,PERF,TUN_C client;
+    class Underlay,ISP1,ISP2 underlay;
 ```
+
+## Diagram 2: Server Mesh Topology
 
 ```mermaid
 graph TD
-    %% Virtual Network Fabric focus
-
-    subgraph Fabric["Virtual Network Fabric (Global Overlay)"]
-        FABRIC["Virtual Network Fabric Core"]
+    %% Three-region mesh
+    subgraph US["US-East Server"]
+        S1["Server 1"]
+        H1["Hub: 10.20.1.0/24"]
+        C1A["Client A"]
+        C1B["Client B"]
     end
 
-    subgraph NodeA["QuicEther Node A"]
-        VNA1["Virtual Network Adapter A1"]
-        VNA2["Virtual Network Adapter A2"]
+    subgraph EU["EU-West Server"]
+        S2["Server 2"]
+        H2["Hub: 10.20.2.0/24"]
+        C2A["Client C"]
+        C2B["Client D"]
     end
 
-    subgraph NodeB["QuicEther Node B"]
-        VNB1["Virtual Network Adapter B1"]
-        VNB2["Virtual Network Adapter B2"]
+    subgraph AP["AP-South Server"]
+        S3["Server 3"]
+        H3["Hub: 10.20.3.0/24"]
+        C3A["Client E"]
     end
 
-    subgraph NodeC["QuicEther Node C"]
-        VNC1["Virtual Network Adapter C1"]
-    end
+    %% Client connections
+    C1A & C1B -->|"QUIC"| S1
+    C2A & C2B -->|"QUIC"| S2
+    C3A -->|"QUIC"| S3
 
-    %% Connections into the fabric
-    VNA1 --- FABRIC
-    VNA2 --- FABRIC
-    VNB1 --- FABRIC
-    VNB2 --- FABRIC
-    VNC1 --- FABRIC
+    %% Mesh links
+    S1 <-->|"Mesh QUIC<br/>(shared token)"| S2
+    S2 <-->|"Mesh QUIC<br/>(shared token)"| S3
+    S1 <-->|"Mesh QUIC<br/>(shared token)"| S3
 
-    %% Optional underlay links
-    subgraph UnderlayNet["Underlay Networks"]
-        U1["ISP / WAN Links"]
-        U2["LAN / Wi-Fi"]
-    end
+    %% Cascade routing example
+    C1A -.->|"Cascade route:<br/>A → S1 → S2 → C"| C2A
 
-    FABRIC -. "QUIC Tunnels" .- U1
-    FABRIC -. "QUIC Tunnels" .- U2
+    %% Styling
+    classDef server fill:#e3f2fd,stroke:#1e88e5;
+    classDef client fill:#e8f5e9,stroke:#43a047;
+
+    class S1,S2,S3,H1,H2,H3 server;
+    class C1A,C1B,C2A,C2B,C3A client;
 ```
 
+## Diagram 3: Authentication & Session Flow
+
 ```mermaid
-graph TD
-    %% DHT nodes forming the overlay
-    subgraph DHTCluster["Kademlia DHT"]
-        A["Node A (NodeId A)"]
-        B["Node B (NodeId B)"]
-        C["Node C (NodeId C)"]
-        D["Node D (NodeId D)"]
-        E["Node E (NodeId E)"]
+sequenceDiagram
+    participant C as Client
+    participant Q as QUIC/TLS 1.3
+    participant A as Auth Service
+    participant H as Hub Manager
+    participant S as Session Manager
+
+    C->>Q: QUIC handshake (0-RTT if resuming)
+    Q->>A: Auth frame (method + credentials)
+    
+    alt Identity Auth
+        A->>A: Verify Ed25519 signature
+        A->>A: Derive BLAKE3 identity ID
+    else Password Auth
+        A->>A: Verify Argon2id hash
+        A->>A: Check lockout status
+    else Service Token
+        A->>A: Verify SHA-256 token hash
+        A->>A: Check expiry + max sessions
     end
+    
+    A->>H: Request hub access
+    H->>H: Check access control (identities/groups)
+    H->>S: Create session
+    S->>S: Allocate IP from CIDR pool
+    S->>S: Apply firewall rules
+    S-->>C: Session established (assigned IP, routes, DNS)
+    
+    loop Data plane
+        C->>Q: PacketBatch (LZ4 compressed, ChaCha20 encrypted)
+        Q->>H: Route through firewall + NAT
+        H-->>C: Response packets
+    end
+```
 
-    %% Bucket relationships (logical)
-    A --- B
-    A --- C
-    B --- D
-    C --- E
+## Diagram 4: Hub Multi-Tenancy
 
-    %% Lookup flow
-    CLIENT["Lookup: SUBNET 10.0.0.0/16"] --> A
-    A -->|FIND_NODE / FIND_VALUE| B
-    B -->|Closer to key| D
-    D -->|Returns record| CLIENT
-
-    %% Record types
-    RECORD_NODE["DHT Record: NODE:<NodeId> → {addrs, pubkey, caps}"]
-    RECORD_SUBNET["DHT Record: SUBNET:<CIDR> → {owner NodeId}"]
-
-    D -. store .-> RECORD_NODE
-    D -. store .-> RECORD_SUBNET
+```mermaid
+graph LR
+    subgraph Server["QuicEther Server"]
+        subgraph HubEng["Hub: engineering<br/>10.20.1.0/24"]
+            E1["Alice<br/>10.20.1.2"]
+            E2["Bob<br/>10.20.1.3"]
+            FW1["Firewall:<br/>ACCEPT tcp/22,443<br/>DROP all"]
+        end
+        
+        subgraph HubGuest["Hub: guests<br/>10.20.2.0/24"]
+            G1["Visitor<br/>10.20.2.2"]
+            FW2["Firewall:<br/>ACCEPT tcp/80,443<br/>DROP all"]
+        end
+        
+        subgraph HubBridge["Hub: datacenter<br/>10.20.3.0/24"]
+            B1["Site-B Bridge<br/>10.20.3.2"]
+            FW3["Firewall:<br/>ACCEPT all<br/>(trusted)"]
+            LAN["→ 192.168.1.0/24"]
+        end
+    end
+    
+    %% Isolation
+    HubEng ~~~ HubGuest
+    HubGuest ~~~ HubBridge
+    
+    %% Notes
+    B1 --> LAN
 ```

@@ -116,11 +116,11 @@ What if we could build a system where:
    - No relay nodes needed
    - Shortest path = lowest latency
 
-2. **Distributed Discovery**
-   - No central server required
-   - Every node participates in discovery (Kademlia DHT)
-   - Resilient to infrastructure failures
-   - Self-organizing network
+2. **Server Mesh Discovery**
+   - Hub-based multi-tenancy with server mesh for multi-region
+   - Cascade routing across mesh peers
+   - Resilient to individual server failures
+   - Simple configuration, no DHT complexity
 
 3. **User-Owned Infrastructure**
    - You deploy gateway nodes on your hardware for subnet routing
@@ -213,13 +213,13 @@ Want to run your own relay? Good luck:
 ```
 QuicEther Setup:
 1. Download single binary
-2. Run: quicether init
-3. Run: quicether start
-4. Done (participates in distributed network)
+2. Generate identity: quicether identity generate
+3. Run: quicether connect --server vpn.example.com
+4. Done (connected to VPN)
 
-Want to run a relay/gateway?
-5. Run: quicether --relay
-   (same binary, just different config)
+Want to run a server?
+5. Run: quicether server --config server.toml
+   (same binary, just different command)
 ```
 
 **Key Insight:** Single binary, role determined by configuration.
@@ -316,7 +316,7 @@ It's equally important to be clear about what QuicEther is **not** trying to sol
 - Work on every network without any configuration
 - Magically punch through every firewall
 
-**Why:** Some networks are legitimately restrictive (corporate, government). DHT may be blocked, requiring manual bootstrap configuration. We can't violate network policies, only work within them.
+**Why:** Some networks are legitimately restrictive (corporate, government). We can't violate network policies, only work within them.
 
 ## Success Criteria
 
@@ -358,9 +358,8 @@ QuicEther will be considered successful if:
 
 ✅ **"I can run fully isolated networks"**
 - Air-gapped networks possible
-- No dependency on external bootstrap nodes
-- Private DHT network with own bootstrap nodes
-- Optional blockchain for persistent state
+- No dependency on external services
+- Private mesh networks with own server infrastructure
 
 ### For Developers
 
@@ -368,6 +367,34 @@ QuicEther will be considered successful if:
 - Source code is readable
 - Architecture is documented
 - No magic black boxes
+
+---
+
+## Validation: What HTTP Fabric Proved
+
+Before designing QuicEther, we built **HTTP Fabric (httpf)** — an experimental Layer 3 VPN over HTTP/WebSocket. httpf is fully functional and validated the following:
+
+- **Hub-based multi-tenancy works** — Multiple isolated network namespaces on a single server, each with its own IP pool, firewall, and policies
+- **Session management works** — Challenge-response auth, IP assignment, timeout tracking, graceful disconnect
+- **Multi-connection aggregation works** — Parallel TCP streams + multipath across interfaces delivers real bandwidth gains
+- **Three-tier auth works** — Ed25519 identity (primary), password with Argon2id (fallback), service tokens (M2M)
+- **Server mesh works** — Server-to-server WebSocket tunnels with automatic reconnection provide distributed topology without DHT
+- **Cascade routing works** — Multi-hop server chaining for privacy and geographic routing
+- **Firewall + policy engine works** — Proxmox-style ACL rules + per-identity L3/L4 policies
+- **Mobile FFI works** — Single Rust codebase with C-compatible FFI for iOS and Android
+- **Single binary design works** — Server, client, bridge, identity management, all in one binary
+
+**What httpf proved needs improvement:**
+- HTTP/WebSocket adds unnecessary overhead (TCP head-of-line blocking, HTTP framing)
+- TCP-based multipath requires application-level reordering and deduplication
+- No native connection migration (TCP connections break on IP change)
+
+**QuicEther's answer:** Replace the transport layer with native QUIC.
+- QUIC eliminates TCP head-of-line blocking
+- QUIC multipath extensions handle path aggregation at the transport level
+- QUIC connection migration survives IP/port changes natively
+- QUIC integrates TLS 1.3 with zero additional handshake overhead
+- Everything else (auth, hubs, firewall, policy, mesh, cascade, FFI) carries forward directly
 
 ✅ **"I can extend it for my use case"**
 - Plugin system for custom policies
@@ -385,10 +412,10 @@ QuicEther exists to solve:
 5. **Privacy** through end-to-end encryption (vendor-blind data plane)
 
 We do this by:
-- Using QUIC for transport (modern, multipath-capable)
-- Kademlia DHT for distributed discovery
-- Blockchain for persistent state (optional)
-- Single binary, role via configuration
-- Zero-trust security model
+- Using native QUIC for transport (multipath-capable, 0-RTT)
+- Server mesh for discovery and cascade routing
+- Three-tier auth (Ed25519, passwords, service tokens)
+- Single binary, role via configuration (`server`/`connect`/`bridge`)
+- Zero-trust security model with firewall and policy engines
 
 Next chapter: We'll analyze how existing solutions fail to solve these problems adequately, and why a new approach is needed.

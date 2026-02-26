@@ -48,13 +48,16 @@ Company Office Network (10.0.0.0/16)
 
 **Setup:**
 ```bash
-# Sarah's laptop
-quicether init
-quicether start --bootstrap company-dht.startup.com
+# Company office — QuicEther server with hub
+quicether server --config company-server.toml
+# Hub "dev" with subnet 10.0.0.0/16, identity allowlist
 
-# Automatically discovers company office gateway
-# Routes 10.0.0.0/16 → via office-gateway
-# Everything else → via local ISP (no split-tunnel config)
+# Sarah's laptop — QuicEther client
+quicether connect --server company-vpn.startup.com --hub dev
+
+# Automatically assigned VPN IP from hub pool
+# Routes 10.0.0.0/16 → via QUIC tunnel
+# Everything else → via local ISP (split-tunnel by default)
 ```
 
 **Success Criteria:**
@@ -108,22 +111,17 @@ Remote Worker 2 (laptop, dynamic)
 
 **Setup (by IT consultant):**
 ```bash
-# Main office - Gateway
-quicether init --role gateway
-quicether start \
-  --advertise-subnet 192.168.1.0/24 \
-  --bootstrap business-dht.example.com
+# Main office — QuicEther server with hub
+quicether server --config office.toml
+# Hub "office" advertises 192.168.1.0/24
+# Server mesh enabled for multi-site
 
-# Home offices - Gateways
-quicether init --role gateway
-quicether start \
-  --advertise-subnet 192.168.2.0/24 \
-  --connect-to main-office-gateway
+# Home offices — QuicEther in bridge mode
+quicether bridge --server main-office.example.com --hub office \
+  --advertise-subnet 192.168.2.0/24
 
-# Remote workers - Clients
-quicether init
-quicether start \
-  --connect-to main-office-gateway
+# Remote workers — QuicEther clients
+quicether connect --server main-office.example.com --hub office
 ```
 
 **Success Criteria:**
@@ -184,29 +182,23 @@ Cloud (Oracle Free Tier)
 
 **Advanced Setup:**
 ```bash
-# Home - Main node with multipath
-quicether init --name home-server
-quicether start \
-  --interfaces eth0,eth1 \  # Both ISPs
-  --multipath aggregate \
-  --advertise-subnet 192.168.1.0/24
+# Home — Server with multipath
+quicether server --config home.toml
+# Hub "homelab" with subnet 192.168.1.0/24
+# Multipath enabled across eth0 (fiber) + eth1 (cable)
 
-# Colo - High-bandwidth gateway
-quicether init --name colo-gateway --role gateway
-quicether start \
-  --advertise-bandwidth 1Gbps \
-  --forward-for home-server
+# Colo — Server in mesh with home
+quicether server --config colo.toml
+# Mesh peer: home server
+# Hub "colo" with 1Gbps uplink
 
-# Cloud - Public bootstrap node
-quicether init --name cloud-bootstrap --bootstrap-mode
-quicether start \
-  --public-ip 150.230.x.x \
-  --advertise-as-bootstrap
+# Cloud — Server as public entry point
+quicether server --config cloud.toml
+# Public IP, mesh peer for home + colo
 
-# Laptop - Mobile client
-quicether init
-quicether start
-# Auto-discovers all other nodes via cloud-gateway
+# Laptop — Client with auto-discovery via any server
+quicether connect --server cloud.example.com
+# Discovers all hubs via server mesh
 ```
 
 **Advanced Use Case - Plex Streaming:**
@@ -224,7 +216,7 @@ Plex Server → QuicEther → Colo Gateway (fast uplink) → Remote User
 - ✅ Survives IP changes (dynamic DNS not needed)
 
 **Acceptance Test:**
-Alex adds a new Raspberry Pi to homelab, runs `quicether start`, and it immediately appears in his mesh topology with no configuration.
+Alex adds a new Raspberry Pi to homelab, runs `quicether connect --server home.local`, and it immediately joins the mesh with no additional configuration.
 
 ---
 
@@ -270,18 +262,14 @@ Maria's Setup (traveling)
 
 **Multipath Aggregation Setup:**
 ```bash
-# Home NAS - Gateway
-quicether init --name home-nas
-quicether start \
-  --advertise-subnet 192.168.1.0/24 \
-  --accept-multipath
+# Home NAS — Server mode
+quicether server --config home-nas.toml
+# Hub "studio" with subnet 192.168.1.0/24
 
-# Maria's Laptop - Multipath client
-quicether init --name maria-laptop
-quicether start \
-  --interfaces wlan0,wwan0 \  # WiFi + mobile
-  --multipath aggregate \
-  --target home-nas
+# Maria's Laptop — Client with multipath
+quicether connect --server home-nas.example.com --hub studio \
+  --interfaces wlan0,wwan0 \
+  --multipath aggregate
 ```
 
 **Real-World Scenario:**
@@ -355,17 +343,15 @@ But 2.25× download, 2.75× upload
 **Setup:**
 ```bash
 # Priya's desktop with USB Ethernet adapters
-quicether init
-quicether start \
+quicether connect --server datacenter.example.com \
   --interfaces eth0,eth1,wwan0,sat0 \
   --multipath aggregate \
-  --scheduler weighted \
-  --target datacenter-node
+  --performance throughput
 
-# Cheap cloud VM as gateway node
+# Cheap cloud VM as QuicEther server
 # (Hetzner: $5/month)
-quicether init --name datacenter-gateway --role gateway
-quicether start --accept-multipath
+quicether server --config datacenter.toml
+# Hub "priya" with NAT to internet
 ```
 
 **Path Quality Handling:**
@@ -429,30 +415,24 @@ Requirements:
 
 **Proof of Concept Setup:**
 ```bash
-# HQ - Main gateway + DHT bootstrap
-quicether init --name hq-gateway --enterprise
-quicether start \
-  --advertise-subnet 10.0.0.0/16 \
-  --interfaces eth0,eth1 \  # Dual ISPs
-  --multipath failover \
-  --bootstrap-mode \
-  --audit-log /var/log/quicether/audit.log
+# HQ — Main server + mesh hub
+quicether server --config hq.toml
+# Hub "corp" with subnet 10.0.0.0/16
+# Dual ISP multipath, firewall rules, policy engine
+# Audit logging to /var/log/quicether/audit.json
 
-# Factory - Gateway with multipath
-quicether init --name factory-gateway --enterprise
-quicether start \
-  --advertise-subnet 10.1.0.0/16 \
-  --interfaces eth0,eth1,eth2 \  # 3 ISPs
-  --multipath aggregate
+# Factory — Server in mesh with HQ
+quicether server --config factory.toml
+# Hub "factory" with subnet 10.1.0.0/16
+# Mesh peer: HQ server
+# Triple ISP multipath
 
-# Warehouse - Simple gateway
-quicether init --name warehouse-gateway --enterprise
-quicether start \
-  --advertise-subnet 10.2.0.0/16
+# Warehouse — Server in mesh
+quicether server --config warehouse.toml
+# Hub "warehouse" with subnet 10.2.0.0/16
 
-# Sales team - Mobile clients
-quicether init
-quicether start --require-2fa
+# Sales team — Mobile clients
+quicether connect --server hq.example.com --hub corp
 ```
 
 **Cost Comparison:**

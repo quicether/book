@@ -23,15 +23,15 @@ We use multiple layers of testing:
 
 1. **Unit tests:**
    - Small, fast, deterministic
-   - Validate pure logic (routing tables, DHT buckets, policy engine)
+   - Validate pure logic (routing tables, hub management, firewall engine, policy engine)
 
 2. **Integration tests:**
    - Multiple components within one process
-   - e.g., DHT + transport, policy + router
+   - e.g., auth + session manager, firewall + router, policy + router
 
-3. **System tests (multi‑node):**
-   - Multiple QuicEther nodes, simulated or real
-   - Exercise full flows: discovery → connect → route → policy
+3. **System tests (multi-node):**
+   - Server + multiple clients, simulated or real
+   - Exercise full flows: connect → authenticate → assign hub → route → policy
 
 4. **Performance tests:**
    - Throughput, latency, CPU usage
@@ -45,19 +45,30 @@ We use multiple layers of testing:
 
 ### 13.2.1 Targets
 
-- DHT routing table:
-  - Bucket insert/eviction
-  - XOR distance ordering
+- Hub manager:
+  - IP pool allocation/deallocation
+  - CIDR range exhaustion handling
+- Session manager:
+  - Session lifecycle (create, track, destroy)
+  - Concurrent session limits
+- Firewall engine:
+  - Rule matching (allow/deny, first-match)
+  - Port ranges, protocol filtering
 - Policy engine:
-  - Rule matching (allow/deny)
+  - Per-identity rule matching
   - Group membership resolution
 - Routing:
-  - Longest‑prefix match
-  - Local vs Node vs Gateway precedence
+  - Longest-prefix match
+  - Local vs Server vs Bridge vs MeshPeer precedence
+- Auth:
+  - Password verification (Argon2id)
+  - Ed25519 signature validation
+  - Service token matching
 - Config loader:
   - Precedence (defaults, file, env, flags)
-- Metrics helpers:
-  - Counters, histograms, gauges
+- Virtual NAT:
+  - Anti-spoofing validation
+  - IP assignment correctness
 
 ### 13.2.2 Tooling
 
@@ -87,27 +98,32 @@ Integration tests combine multiple modules in‑process.
 
 ### 13.3.1 Examples
 
-- **DHT + Node Identity:**
-  - Generate many NodeIds
-  - Insert into routing table
-  - Test `FIND_NODE` correctness
+- **Auth + Session Manager:**
+  - Configure three-tier auth
+  - Simulate client connections
+  - Verify session creation and IP assignment
 
-- **Router + Policy:**
-  - Configure routes and policies
+- **Router + Firewall + Policy:**
+  - Configure hubs, firewall rules, and policies
   - Feed in synthetic packets
-  - Verify allow/deny + next hop decisions
+  - Verify allow/deny + correct routing decisions
 
-- **QUIC Transport + Encapsulation:**
+- **QUIC Transport + PacketBatch:**
   - Spin up QUIC endpoints in test
-  - Send encapsulated IP packets
+  - Send PacketBatch-encapsulated IP packets
   - Confirm they emerge intact on the other side
+
+- **Mesh Protocol:**
+  - Two servers exchange hub updates
+  - Verify route table synchronization
 
 ### 13.3.2 Layout
 
 - Place in `tests/` directory with descriptive names:
-  - `tests/dht_integration.rs`
-  - `tests/router_policy.rs`
+  - `tests/auth_session.rs`
+  - `tests/router_firewall_policy.rs`
   - `tests/quic_tunnel.rs`
+  - `tests/mesh_protocol.rs`
 
 ---
 
@@ -122,47 +138,57 @@ Use `docker-compose` to simulate a small network:
 ```yaml
 version: '3.8'
 services:
-  node1:
+  server:
     image: quicether:test
-    command: ["quicether", "start", "--config", "/config/node1.toml"]
-    network_mode: host
+    command: ["quicether", "server", "--config", "/config/server.toml"]
+    networks:
+      - vpn_net
 
-  node2:
+  client1:
     image: quicether:test
-    command: ["quicether", "start", "--config", "/config/node2.toml"]
-    network_mode: host
+    command: ["quicether", "connect", "--server", "server:4433"]
+    networks:
+      - vpn_net
+
+  client2:
+    image: quicether:test
+    command: ["quicether", "connect", "--server", "server:4433"]
+    networks:
+      - vpn_net
+
+networks:
+  vpn_net:
+    driver: bridge
 ```
-
-While `network_mode: host` is one option, we can also use docker networks to simulate NAT behavior.
 
 Tests scripted with:
 - `docker-compose up -d`
-- Run `quicether` CLI from host to inspect peers/routes
-- Run `ping`/`iperf` between containers
+- Run `quicether` CLI to inspect sessions/routes
+- Run `ping`/`iperf` between client containers via overlay
 
 ### 13.4.2 Specific Scenarios
 
 1. **Personal VPN:**
-   - Node A (home), Node B (laptop)
+   - Server + client
    - Verify:
-     - Discovery via DHT
-     - Direct QUIC connection
+     - QUIC connection + TLS 1.3 auth
+     - Hub assignment + virtual IP
      - Ping + SSH over overlay
 
-2. **Site‑to‑Site:**
-   - HQ and Factory with distinct subnets
+2. **Site-to-Site:**
+   - Two servers with mesh, distinct hub subnets
    - Validate:
-     - Subnet advertisement
-     - Overlay routing
-     - Failover via gateway when direct path removed
+     - Mesh peer connection
+     - Cross-hub routing
+     - Client-to-client communication across servers
 
 3. **Multipath:**
-   - Node with multiple interfaces, separate docker networks as different ISPs
+   - Client with multiple interfaces, separate docker networks as different ISPs
    - Validate traffic distribution and failover
 
 4. **Policy Enforcement:**
-   - Define allow/deny rules
-   - Confirm unauthorized attempts are blocked and logged
+   - Define firewall + policy rules
+   - Confirm unauthorized attempts are blocked and logged to audit
 
 ---
 
@@ -229,12 +255,13 @@ Validation:
   - Time to detect failure
   - How quickly routes are updated
 
-### 13.6.3 DHT Partitions
+### 13.6.3 Mesh Partitions
 
-- Use firewall rules or docker networks to partition subsets of nodes
+- Use firewall rules or docker networks to partition mesh peers
 - Validate:
-  - Existing connections continue when possible
-  - New lookups eventually succeed when partition heals
+  - Existing client sessions continue on their server
+  - Cross-hub traffic fails gracefully during partition
+  - Routes re-converge when partition heals
 
 ---
 
@@ -248,9 +275,11 @@ Validation:
 ### 13.7.2 Fuzzing
 
 Targets:
-- DHT message parsing
+- QUIC handshake message parsing
+- PacketBatch parsing
 - Config file parsing
-- Policy parser
+- Firewall rule parsing
+- Policy rule parsing
 
 Tools:
 - `cargo-fuzz` with AFL/libFuzzer integration
@@ -260,8 +289,10 @@ Tools:
 - External security review once v1.0 candidate is ready
 - Focus areas:
   - TLS usage and key handling
-  - DHT poisoning and injection protections
-  - Policy bypass attempts
+  - Auth bypass attempts (all three tiers)
+  - Firewall rule bypass attempts
+  - IP spoofing against virtual NAT
+  - Mesh protocol injection
 
 ---
 
@@ -324,7 +355,8 @@ To ensure we don’t miss real‑world workflows:
 This chapter defined how we will validate QuicEther:
 - Layered testing (unit → integration → system → performance → chaos)
 - Concrete test scenarios tied to architecture and personas
-- CI/CD practices to keep quality high as the codebase grows
+- CI/CD practices carried forward from httpf
+- Security testing including fuzzing, static analysis, and penetration testing
 
 Testing is not a one‑time phase; it is an ongoing process built into every milestone of the implementation roadmap.
 

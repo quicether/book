@@ -1,8 +1,10 @@
-# QuicEther Pre-Development Book
+# QuicEther Design Book
 
 ## Introduction
 
-This book documents the foundational thinking, requirements analysis, and architectural decisions for QuicEther **before** writing any code. It serves as the authoritative reference for understanding **why** QuicEther exists and **how** it should be built.
+This book documents the design, architecture, and implementation strategy for QuicEther — a **Layer 3 VPN built on native QUIC transport**.
+
+QuicEther evolves from the lessons learned building **HTTP Fabric (httpf)**, an experimental VPN that tunneled IP packets over HTTP/WebSocket. httpf validated the core architecture — hub-based multi-tenancy, session management, multi-connection aggregation, firewall and policy engines, server mesh networking, cascade routing, mobile FFI, and the full authentication model. QuicEther takes everything that worked in httpf and rebuilds it on **QUIC** (RFC 9000) for native multipath, connection migration, and superior performance — with no HTTP layer, no WebSocket framing, no TCP overhead.
 
 ---
 
@@ -19,23 +21,20 @@ This book documents the foundational thinking, requirements analysis, and archit
 - **Chapter 6:** Technology Choices & Trade-offs
 
 ### Part III: Technical Deep-Dive
-- **Chapter 7:** Network Layer Design (L2/L3)
-- **Chapter 8:** Distributed Discovery (Kademlia DHT)
-- **Chapter 9:** Persistent State (Blockchain)
-- **Chapter 10:** Multi-Path Aggregation
-- **Chapter 11:** Security Model & Zero-Trust
+- **Chapter 7:** Server Mesh & Discovery
+- **Chapter 8:** QUIC Transport & Multipath
+- **Chapter 9:** Security & Zero-Trust
+- **Chapter 10:** VPN Interface & Routing
+- **Chapter 11:** Daemon & CLI Architecture
 
 ### Part IV: Implementation Strategy
-- **Chapter 12:** Development Phases
+- **Chapter 12:** Implementation Roadmap
 - **Chapter 13:** Testing & Validation Strategy
-- **Chapter 14:** Deployment Models
-- **Chapter 15:** Performance Targets & Benchmarks
+- **Chapter 14:** Deployment & Operations
+- **Chapter 15:** Configuration Reference
 
-### Part V: Operational Concerns
-- **Chapter 16:** Configuration Management
-- **Chapter 17:** Monitoring & Observability
-- **Chapter 18:** Troubleshooting & Debugging
-- **Chapter 19:** Upgrade & Migration Paths
+### Part V: Future Directions
+- **Chapter 16:** Future Directions & Extensions
 
 ---
 
@@ -44,12 +43,12 @@ This book documents the foundational thinking, requirements analysis, and archit
 **For Decision Makers:**
 - Read Part I (Problem Space) and Part II (Solution Vision)
 - Skim Part III for technical feasibility
-- Review Part V for operational viability
+- Review Chapter 14 for deployment patterns
 
 **For Architects:**
 - Focus on Part II (Solution Vision) and Part III (Technical Deep-Dive)
 - Study Chapter 6 (Technology Choices) carefully
-- Reference Part IV for phasing strategy
+- Reference Part IV for implementation strategy
 
 **For Developers:**
 - Read everything, but especially Part III and Part IV
@@ -57,18 +56,36 @@ This book documents the foundational thinking, requirements analysis, and archit
 - Refer back when making implementation choices
 
 **For Operators:**
-- Focus on Part V (Operational Concerns)
-- Review Part II for understanding system behavior
-- Study Chapter 14 (Deployment Models) for your environment
+- Skim Part I-II for context
+- Read Chapter 5 for system understanding
+- Focus on Chapters 14-15 for deployment and configuration
 
 ---
 
 ## Document Status
 
-**Version:** 1.0 (Pre-Development)  
-**Date:** November 20, 2025  
-**Status:** Living Document  
-**Next Review:** Before Phase 1 implementation begins
+**Version:** 2.0 (Post-httpf Revision)  
+**Date:** February 27, 2026  
+**Status:** Living Document — revised based on httpf implementation experience  
+**Previous Version:** v1.0 (Pre-Development, November 2025)
+
+---
+
+## What Changed Since v1.0
+
+The original book was written before any code existed, envisioning a pure peer-to-peer system with Kademlia DHT as the foundation. After building httpf end-to-end, major revisions reflect proven reality:
+
+| Aspect | v1.0 (Theory) | v2.0 (Post-httpf) |
+|--------|---------------|-------------------|
+| **Topology** | Pure P2P, every node equal | Client-server with hubs; server mesh for distribution |
+| **Discovery** | Kademlia DHT from day 1 | Server-based; DHT deferred to future versions |
+| **Protocol** | Conceptual QUIC encapsulation | Proven PacketBatch framing with LZ4 + ChaCha20 |
+| **Auth** | TLS 1.3 mutual auth only | Three-tier: Ed25519 identity + password + service tokens |
+| **Hashing** | SHA-1 for NodeId | BLAKE3 for all hashing |
+| **Server features** | Minimal routing | Hubs, virtual NAT, firewall, policy, rate limiting, audit |
+| **Networking** | Direct P2P only | Server mesh + cascade/multi-hop |
+| **Mobile** | Not mentioned | FFI crate with iOS/Android support |
+| **Blockchain** | Optional future feature | Removed entirely |
 
 ---
 
@@ -76,10 +93,10 @@ This book documents the foundational thinking, requirements analysis, and archit
 
 This book is written with these principles:
 
-1. **First Principles Thinking**
-   - Start from fundamental truths, not existing solutions
-   - Question every assumption
-   - Build up from basic requirements
+1. **Implementation-Informed Design**
+   - Every architectural decision has been validated in httpf
+   - Theory is grounded in working code
+   - Proven patterns are preserved; unproven ideas are deferred
 
 2. **User-Centric Design**
    - Every decision serves a real user need
@@ -94,20 +111,7 @@ This book is written with these principles:
 4. **Transparent Documentation**
    - Explain the "why" behind every decision
    - Document what we rejected and why
-   - Admit what we don't know yet
-
----
-
-## Contributing to This Book
-
-As we learn more during development, this book should evolve:
-
-- **Add learnings:** Document surprising insights from prototyping
-- **Update trade-offs:** Revise if our assumptions prove wrong
-- **Expand details:** Add depth where initial thinking was shallow
-- **Preserve history:** Keep decision logs, don't just erase old thinking
-
-**Rule:** Every major architectural decision should be documented here BEFORE implementing it in code.
+   - Include lessons learned from httpf
 
 ---
 
