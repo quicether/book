@@ -3,8 +3,8 @@
 ## Introduction
 
 This chapter describes how users and operators **interact** with QuicEther:
-- The daemon process (long‑running service)
-- The CLI tool (user‑facing entrypoint)
+- The daemon process (long-running service)
+- The CLI tool (user-facing entrypoint)
 - Internal APIs between CLI and daemon
 - Configuration loading and precedence
 - Extensibility for GUIs and orchestration tools
@@ -22,7 +22,7 @@ The goal is a **single binary** (`quicether`) that can act as:
 - **Scriptable:** CLI with predictable output formats for automation
 - **Safe defaults:** `quicether server` or `quicether connect` should "just work" for most users
 - **Clear separation:** Data plane in daemon, control via CLI/API
-- **OS‑friendly:** Integrate with systemd/launchd/Windows services
+- **OS-friendly:** Integrate with systemd/launchd/Windows services
 
 ---
 
@@ -39,7 +39,7 @@ quicether server stop    # Stop running server
 
 # Client mode
 quicether connect        # Connect to a VPN server
-quicether bridge         # Connect + forward local subnet
+quicether bridge         # Connect + bridge local LAN
 
 # Identity & auth management
 quicether identity       # Generate or show Ed25519 identity
@@ -53,14 +53,14 @@ quicether audit          # Query audit logs
 
 # Diagnostic
 quicether status         # Show connection status
-quicether routes         # Show overlay routes
+quicether mac-table      # Show MAC forwarding table
 quicether multipath      # Show per-path stats
 quicether logs           # Stream daemon logs
 ```
 
 Under the hood:
-- **Server mode:** `quicether server` runs long-lived process managing TUN, QUIC, hubs, sessions, mesh, etc.
-- **Client mode:** `quicether connect` establishes tunnel to server and manages TUN
+- **Server mode:** `quicether server` runs long-lived process managing TAP, QUIC, Virtual Hubs, sessions, mesh, etc.
+- **Client mode:** `quicether connect` establishes tunnel to server and manages TAP interface
 - **CLI mode:** Administrative subcommands are short-lived clients that talk to the daemon over a local IPC channel or admin API.
 
 ### 11.2.2 IPC Channel
@@ -68,7 +68,7 @@ Under the hood:
 Options considered:
 - UNIX domain sockets (Unix-like OSes)
 - Named pipes (Windows)
-- Local TCP (localhost‑only, as fallback)
+- Local TCP (localhost-only, as fallback)
 
 Chosen approach:
 - Primary: UNIX domain socket (e.g., `/var/run/quicether.sock`)
@@ -76,7 +76,7 @@ Chosen approach:
 - Optional: Local TCP for constrained environments
 
 IPC protocol:
-- Simple JSON‑RPC‑style request/response:
+- Simple JSON-RPC-style request/response:
 
 ```json
 {
@@ -104,7 +104,7 @@ Response:
 
 ---
 
-## 11.3 Daemon Internals (High‑Level)
+## 11.3 Daemon Internals (High-Level)
 
 ### 11.3.1 Core Components
 
@@ -121,7 +121,7 @@ Within the daemon process:
 │  ┌──────▼──────────┐         │
 │  │ Runtime State   │         │
 │  │ (Auth, Hubs,     │         │
-│  │  QUIC, TUN, etc) │         │
+│  │  QUIC, TAP, etc) │         │
 │  └──────┬──────────┘         │
 │         │                    │
 │  ┌──────▼───────────┐        │
@@ -132,10 +132,10 @@ Within the daemon process:
 ```
 
 Key responsibilities:
-- Initialize networking (TUN, QUIC listener)
+- Initialize networking (TAP, QUIC listener)
 - Manage hubs, sessions, and authentication
 - Enforce firewall and policy rules
-- Forward packets between clients and mesh peers
+- Switch Ethernet frames between clients and mesh peers
 - Expose admin API for CLI and GUIs
 - Write audit logs
 
@@ -149,12 +149,12 @@ struct DaemonState {
     identity: Identity,           // Ed25519 keypair + BLAKE3 NodeId
     auth: AuthService,            // Three-tier auth (Ed25519/password/service token)
     transport: QuicTransport,     // QUIC listener + connections
-    tun: TunInterface,
-    hubs: HubManager,             // Virtual networks with IP pools
+    tap: TapInterface,
+    hubs: HubManager,             // Virtual Hubs (Ethernet segments)
     sessions: SessionManager,     // Active client sessions
-    router: PacketRouter,         // Virtual NAT + routing
+    switch: FrameSwitch,          // Virtual Hub MAC-based switching
     firewall: FirewallEngine,     // Proxmox-style ACL rules
-    policy: PolicyEngine,         // Per-identity L3/L4 rules
+    policy: PolicyEngine,         // Per-identity L2/L3/L4 rules
     multipath: PathManager,
     mesh: MeshManager,            // Server mesh peer connections
     audit: AuditLogger,           // JSONL + syslog
@@ -172,13 +172,13 @@ All IPC requests operate by reading/modifying this state through safe interfaces
 ### 11.4.1 Sources & Precedence
 
 Configuration can come from:
-- Built‑in defaults
+- Built-in defaults
 - Config file (TOML/YAML), e.g., `/etc/quicether/config.toml` or `~/.config/quicether/config.toml`
 - Environment variables
-- Command‑line flags
+- Command-line flags
 
 Precedence (lowest to highest):
-1. Built‑in defaults
+1. Built-in defaults
 2. Config file
 3. Environment variables
 4. CLI arguments
@@ -188,11 +188,11 @@ Example:
 ```bash
 # config.toml
 [network]
-tun_name = "quicether0"
+tap_name = "quicether0"
 
 # Override at runtime
-QUICETHER_TUN_NAME=qe0 quicether server --tun-name qe1
-# Effective tun_name: qe1 (flag wins)
+QUICETHER_TAP_NAME=qe0 quicether server --tap-name qe1
+# Effective tap_name: qe1 (flag wins)
 ```
 
 ### 11.4.2 Sample Config Files
@@ -208,16 +208,18 @@ method = "password"  # or "identity" or "service_token"
 
 [[hubs]]
 name = "default"
-subnet = "10.100.0.0/24"
 dns = ["1.1.1.1", "8.8.8.8"]
+
+[hubs.secure_nat]
+enabled = false  # Physical router handles DHCP
 
 [firewall]
 default_action = "deny"
 
 [[firewall.rules]]
 action = "allow"
-src = "10.100.0.0/24"
-dst = "10.100.0.0/24"
+src = "*"
+dst = "*"
 
 [mesh]
 enabled = false
@@ -275,8 +277,8 @@ quicether server --config server.toml --daemon
 # Connect to server as client
 quicether connect --server vpn.example.com:4433
 
-# Connect as bridge (forwarding local subnet)
-quicether bridge --server vpn.example.com:4433 --local-subnet 192.168.1.0/24
+# Connect as bridge (bridging local LAN to hub)
+quicether bridge --server vpn.example.com:4433 --bridge-interface eth0
 
 # Stop running server
 quicether server stop
@@ -294,7 +296,8 @@ quicether status
 # Identity: sarah (Ed25519)
 # Server: vpn.example.com:4433
 # Hub: office
-# Virtual IP: 10.100.0.5/24
+# MAC: a1:b2:c3:d4:e5:f6
+# IP (DHCP): 192.168.1.105
 # Uptime: 1h 23m
 # Paths: 2 (eth0, wlan0)
 # Bytes: 1.2 GB sent, 3.4 GB recv
@@ -310,7 +313,8 @@ JSON example:
   "identity": "sarah",
   "server": "vpn.example.com:4433",
   "hub": "office",
-  "virtual_ip": "10.100.0.5/24",
+  "mac": "a1:b2:c3:d4:e5:f6",
+  "ip_dhcp": "192.168.1.105",
   "uptime_sec": 4980,
   "paths": [
     {"if": "eth0", "rtt_ms": 11.2, "state": "active"},
@@ -325,9 +329,9 @@ JSON example:
 
 ```bash
 quicether session list
-# Identity    | Hub     | Virtual IP   | Connected  | Bytes Sent | Bytes Recv
-# sarah       | office  | 10.100.0.5   | 2h 15m     | 1.2 GB     | 3.4 GB
-# james       | office  | 10.100.0.6   | 45m        | 234 MB     | 567 MB
+# Identity    | Hub     | MAC               | Connected  | Bytes Sent | Bytes Recv
+# sarah       | office  | a1:b2:c3:d4:e5:f6 | 2h 15m     | 1.2 GB     | 3.4 GB
+# james       | office  | d7:e8:f9:0a:1b:2c | 45m        | 234 MB     | 567 MB
 
 # Disconnect a session
 quicether session disconnect sarah
@@ -340,12 +344,12 @@ quicether session list --json
 
 ```bash
 quicether hub list
-# Name    | Subnet         | Clients | Max
-# office  | 10.100.0.0/24  | 5       | 253
-# dev     | 10.100.1.0/24  | 2       | 253
+# Name    | Clients | MACs | Bridge
+# office  | 5       | 12   | eth0
+# dev     | 2       | 4    | none
 
 # Create a new hub
-quicether hub create --name staging --subnet 10.100.2.0/24
+quicether hub create --name staging
 ```
 
 #### 11.5.2.5 Identity Management
@@ -404,7 +408,7 @@ WantedBy=multi-user.target
 
 Notes:
 - Run foreground (`--daemon=false`) and let systemd handle process lifecycle
-- Use `CAP_NET_ADMIN` for TUN creation and routing
+- Use `CAP_NET_ADMIN` for TAP creation and bridging
 
 ### 11.6.2 launchd (macOS)
 
@@ -443,11 +447,11 @@ Because the daemon exposes a stable local API, additional tools can be built:
 
 ### 11.7.1 Desktop GUI
 
-- Cross‑platform application using the same IPC as CLI
+- Cross-platform application using the same IPC as CLI
 - Can display:
   - Connection status
-  - Peers and routes
-  - Per‑path usage graphs
+  - Peers and MAC table
+  - Per-path usage graphs
 - Can modify:
   - Basic settings (on/off, interface selection)
 
@@ -527,10 +531,10 @@ quicether/
     mod.rs             # Three-tier auth (identity, password, service_token)
 
   src/network/
-    mod.rs             # Firewall, policy, packet routing
+    mod.rs             # Firewall, policy, frame switching
 
   src/protocol/
-    mod.rs             # QUIC framing, PacketBatch, handshake
+    mod.rs             # QUIC framing, FrameBatch, handshake
 
   crates/ffi/
     src/lib.rs         # Mobile FFI (iOS/Android)
@@ -546,7 +550,7 @@ This chapter defined how QuicEther is **operated** (matching httpf's proven mode
 
 - A single `quicether` binary acts as server, client, bridge, and admin CLI
 - The server manages hubs, sessions, authentication, firewall, policy, and mesh
-- The client connects to a server and manages local TUN interface
+- The client connects to a server and manages local TAP interface
 - CLI provides `session`, `hub`, `identity`, `password`, `audit`, and `admin` subcommands
 - Configuration follows a clear precedence: defaults → file → env → flags
 - Integration guidance is provided for systemd, launchd, and Windows services

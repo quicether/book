@@ -8,7 +8,7 @@ We focus on decisions that shape the architecture:
 - Transport protocol
 - Cryptography and identity
 - Discovery mechanism
-- Data plane integration (L2 vs L3)
+- Data plane integration (L2 TAP, SoftEther-inspired)
 - Implementation language and runtime
 
 For each decision we cover:
@@ -159,7 +159,7 @@ For each decision we cover:
 
 **Additional Crypto (validated in httpf):**
 - **BLAKE3** for all hashing (identity derivation, integrity)
-- **ChaCha20-Poly1305** for optional per-packet encryption layer
+- **ChaCha20-Poly1305** for optional per-frame encryption layer
 - **X25519** for ECDH key exchange
 - **Argon2id** for password hashing (legacy auth fallback)
 - **ML-KEM-768** post-quantum readiness (future)
@@ -188,7 +188,7 @@ For each decision we cover:
 2. Static config files (hosts lists)
 3. Gossip protocol (SWIM, HyParView)
 4. Kademlia-style DHT
-5. Server mesh with cascade routing (Chosen)
+5. Server mesh with cascade connections (Chosen)
 
 ### 6.3.1 Central Database
 
@@ -221,7 +221,7 @@ For each decision we cover:
 - Naturally resilient
 
 **Cons:**
-- Harder to answer queries like "who owns subnet 10.1.0.0/16?"
+- Harder to answer queries like "who owns hub 'factory'?"
 - Typically approximate / eventually consistent views
 
 **Verdict:** Useful for liveness but not sufficient as the primary lookup structure.
@@ -240,19 +240,19 @@ For each decision we cover:
 
 **Verdict:** Excellent technology, but overkill for v1.0. Deferred to future extension.
 
-### 6.3.5 Server Mesh with Cascade Routing (Chosen)
+### 6.3.5 Server Mesh with Cascade Connections (Chosen)
 
 **Pros:**
 - Simple configuration (just list peer URLs + tokens)
 - Proven by httpf in production
-- Cascade routing handles cross-region traffic naturally
+- Cascade connections handle cross-region frame forwarding naturally
 - No complex protocol — just QUIC connections between servers
-- Subnet-based routing tables build automatically from mesh config
+- Hub membership and MAC tables synchronize automatically across mesh
 
 **Data Stored (per mesh peer):**
-- Peer URL and subnet ownership
+- Peer URL and hub membership
 - Connection health (RTT, state)
-- Routing table entries for cascade forwarding
+- Learned MAC-to-peer mappings for cascade forwarding
 
 **Trade-offs:**
 - Requires at least one server (not purely P2P)
@@ -265,44 +265,68 @@ For each decision we cover:
 
 ---
 
-## 6.4 Data Plane: L2 vs L3, TUN vs TAP
+## 6.4 Data Plane: Layer 2 (TAP) — SoftEther-Inspired
 
 ### Options Considered
 
-1. L2 bridge (Ethernet, TAP devices)
-2. L3 routed overlay (IP, TUN devices) — **Chosen**
+1. L3 routed overlay (IP, TUN devices)
+2. L2 bridge (Ethernet, TAP devices) — **Chosen**
 
-### 6.4.1 L2 Bridge (TAP)
-
-**Pros:**
-- Transparent to applications (acts like a big Ethernet switch)
-- No need to think about IP addressing per node
-
-**Cons:**
-- Broadcast / multicast storms in large networks
-- Poor scalability across WANs
-- Difficult policy enforcement (everything shares a flat L2 domain)
-
-**Verdict:** Good for small homelabs; dangerous at larger scales.
-
-### 6.4.2 L3 Overlay (TUN) — Chosen
+### 6.4.1 L3 Overlay (TUN)
 
 **Pros:**
 - Clear routing semantics (IP subnets)
-- Works naturally with existing routing protocols
-- Easier to enforce policies (subnet-based)
-- Better fit for enterprise site-to-site use cases
+- Better scalability at very large scales (no broadcast storms)
+- Easier subnet-based policy enforcement
 
 **Cons:**
-- Requires planning IP address space
-- Some L2-only protocols won't work directly (e.g., some discovery protocols)
+- Requires server-side IP management (DHCP, pools, allocation)
+- L2-only protocols won't work (mDNS, ARP-based discovery, DHCP relay)
+- Cannot extend a physical LAN transparently
+- More complex routing table management
 
-**Why TUN over TAP:**
-- Personas focus on **site-to-site** and **remote access**, not arbitrary L2 extension
-- Helps avoid misconfiguration that can melt networks
+**Verdict:** Good for very large deployments, but over-constrains the architecture.
 
-**Mitigation for L2 Needs:**
-- Optional L2 proxy/bridge component in specific subnets (future work)
+### 6.4.2 L2 Bridge (TAP) — Chosen
+
+**Pros:**
+- Transparent to applications (acts like a big Ethernet switch)
+- No server-side IP management — physical router handles DHCP/ARP/DNS
+- Full protocol transparency (ARP, DHCP, mDNS, broadcast all pass through)
+- Natural fit for LAN extension and site-to-site bridging
+- SoftEther-inspired Virtual Hub model (proven at scale)
+
+**Cons:**
+- Broadcast/multicast can cause overhead in large hubs
+- Requires MAC learning table management
+- **TAP not available on all platforms** (iOS, Android only offer TUN/L3)
+
+**Why TAP over TUN:**
+- Our name is Quic**Ether** — Layer 2 is our identity
+- SoftEther proved L2 VPN scales to enterprise with proper hub isolation
+- Physical routers already handle DHCP/ARP — no need to duplicate in software
+- LAN extension is the most natural user mental model ("join the office network")
+- Existing httpf codebase already has full Ethernet frame, ARP, and DHCP parsing
+
+**Solving the Platform Gap — Virtual TAP:**
+
+The main objection to L2 is platform support: iOS and Android don't expose TAP interfaces (only TUN/L3 via `NEPacketTunnelProvider` and `VpnService`). Rather than compromise the architecture by switching to L3 everywhere, QuicEther introduces a **Virtual TAP** abstraction:
+
+- Platforms with TAP support (Linux, macOS, Windows) use **Native TAP** — read/write raw Ethernet frames directly
+- Platforms without TAP (iOS, Android, containers) use **Virtual TAP** — a TUN device with userspace L2↔L3 translation:
+  - **Outbound:** IP packet from TUN → add Ethernet header (dest MAC from ARP cache, src MAC = assigned) → Ethernet frame to overlay
+  - **Inbound:** Ethernet frame from overlay → strip 14-byte Ethernet header → IP packet to TUN
+  - **ARP proxy:** Virtual TAP intercepts ARP requests and replies locally, learning MAC↔IP mappings from observed traffic
+
+The overlay protocol remains **always L2**. The server always sees Ethernet frames. The translation is invisible — a Virtual TAP client and a Native TAP client are indistinguishable from the server's perspective. This is directly inspired by SoftEther's "Virtual Network Adapter" which similarly abstracts platform differences.
+
+See Chapter 10, Section 10.1.3 for the full Virtual TAP design.
+
+**Mitigation for Scale Concerns:**
+- Hub isolation prevents cross-hub broadcast storms
+- MAC table aging (default 300s) limits table size
+- Optional broadcast rate limiting per hub
+- Future: Virtual Layer-3 Switch for inter-hub routing when needed
 
 ---
 
@@ -487,15 +511,15 @@ QuicEther uses **BLAKE3** for all hashing operations:
 | Transport | QUIC | TCP, raw UDP, WireGuard | Multipath, migration, user-space control |
 | Crypto | TLS 1.3 + Ed25519 + BLAKE3 | Custom, TLS 1.2, RSA, SHA-1 | Security, performance |
 | Discovery | Server mesh (explicit peers) | Central DB, DHT, gossip | Proven in httpf, simple, debuggable |
-| Data Plane | L3 TUN | L2 TAP | Scalability, policy control |
+| Data Plane | L2 TAP | L3 TUN | L2 transparency, LAN extension, SoftEther model |
 | Language | Rust | Go, C/C++ | Safety + performance |
 | Multipath | QUIC multipath | MPTCP, bonding hacks | Portability, integration |
-| NAT | Server-based routing | TURN, vendor relays, hole punching | User sovereignty, proven model |
+| NAT | Server-based bridging | TURN, vendor relays, hole punching | User sovereignty, proven model |
 | Hashing | BLAKE3 | SHA-1, SHA-256 | Speed, security, native KDF |
 
 These technology choices directly implement the principles defined in Chapter 4, support the architecture in Chapter 5, and have been validated through building httpf.
 
-**Next Chapter:** We will zoom into the server mesh and discovery layer in detail (mesh protocol, peer management, route exchange).
+**Next Chapter:** We will zoom into the server mesh and discovery layer in detail (mesh protocol, peer management, cascade connections).
 
 ---
 

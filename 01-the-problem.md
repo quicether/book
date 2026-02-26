@@ -118,13 +118,13 @@ What if we could build a system where:
 
 2. **Server Mesh Discovery**
    - Hub-based multi-tenancy with server mesh for multi-region
-   - Cascade routing across mesh peers
+   - Cascade connections across mesh peers
    - Resilient to individual server failures
    - Simple configuration, no DHT complexity
 
 3. **User-Owned Infrastructure**
-   - You deploy gateway nodes on your hardware for subnet routing
-   - You control routing and forwarding decisions
+   - You deploy gateway nodes on your hardware for LAN bridging
+   - You control bridging and forwarding decisions
    - Vendor provides nothing except open source software
 
 4. **Multi-Path Native**
@@ -252,7 +252,7 @@ QuicEther:
 - Scalability limited only by user hardware
 ```
 
-**Key Insight:** Distributed forwarding scales with user needs, no special relay nodes.
+**Key Insight:** Distributed bridging scales with user needs, no special relay nodes.
 
 ### Problem 5: Vendor Lock-In
 
@@ -347,7 +347,7 @@ QuicEther will be considered successful if:
 ✅ **"Remote workers can access office resources"**
 - Works from coffee shop WiFi, hotel, mobile networks
 - No split-tunnel complexity
-- Subnet advertisement "just works"
+- LAN extension "just works" — remote clients join the office Ethernet segment
 
 ### For Advanced Users
 
@@ -372,15 +372,15 @@ QuicEther will be considered successful if:
 
 ## Validation: What HTTP Fabric Proved
 
-Before designing QuicEther, we built **HTTP Fabric (httpf)** — an experimental Layer 3 VPN over HTTP/WebSocket. httpf is fully functional and validated the following:
+Before designing QuicEther, we built **HTTP Fabric (httpf)** — an experimental Layer 2/3 VPN over HTTP/WebSocket. httpf is fully functional and validated the following:
 
-- **Hub-based multi-tenancy works** — Multiple isolated network namespaces on a single server, each with its own IP pool, firewall, and policies
-- **Session management works** — Challenge-response auth, IP assignment, timeout tracking, graceful disconnect
+- **Hub-based multi-tenancy works** — Multiple isolated virtual Ethernet segments on a single server, each with its own MAC table, firewall, and policies
+- **Session management works** — Challenge-response auth, MAC association, timeout tracking, graceful disconnect
 - **Multi-connection aggregation works** — Parallel TCP streams + multipath across interfaces delivers real bandwidth gains
 - **Three-tier auth works** — Ed25519 identity (primary), password with Argon2id (fallback), service tokens (M2M)
 - **Server mesh works** — Server-to-server WebSocket tunnels with automatic reconnection provide distributed topology without DHT
-- **Cascade routing works** — Multi-hop server chaining for privacy and geographic routing
-- **Firewall + policy engine works** — Proxmox-style ACL rules + per-identity L3/L4 policies
+- **Cascade connections work** — Multi-hop server chaining for privacy and geographic bridging
+- **Firewall + policy engine works** — Proxmox-style ACL rules + per-identity L2/L3/L4 policies (MAC, IP, port)
 - **Mobile FFI works** — Single Rust codebase with C-compatible FFI for iOS and Android
 - **Single binary design works** — Server, client, bridge, identity management, all in one binary
 
@@ -412,10 +412,12 @@ QuicEther exists to solve:
 5. **Privacy** through end-to-end encryption (vendor-blind data plane)
 
 We do this by:
+- Operating at **Layer 2** — TAP devices, Ethernet frames, Virtual Hub as a virtual switch
 - Using native QUIC for transport (multipath-capable, 0-RTT)
-- Server mesh for discovery and cascade routing
+- Server mesh for discovery and cascade connections between hubs
+- Physical router handles DHCP/ARP/DNS — no server-side IP management
 - Three-tier auth (Ed25519, passwords, service tokens)
 - Single binary, role via configuration (`server`/`connect`/`bridge`)
-- Zero-trust security model with firewall and policy engines
+- Zero-trust security model with L2/L3/L4 firewall and policy engines
 
 Next chapter: We'll analyze how existing solutions fail to solve these problems adequately, and why a new approach is needed.

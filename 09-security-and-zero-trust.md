@@ -1,8 +1,8 @@
-# Chapter 9: Security & Zero‑Trust
+# Chapter 9: Security & Zero-Trust
 
 ## Introduction
 
-Security is not a bolt‑on for QuicEther—it is **foundational**.
+Security is not a bolt-on for QuicEther—it is **foundational**.
 
 This chapter expands Principle 7 (Security by Default) into a concrete security model:
 - Identity and authentication (who are you?)
@@ -27,11 +27,11 @@ We assume the following potential adversaries:
 
 2. **Active Network Attacker**
    - Can inject, drop, and replay packets
-   - Can attempt on‑path attacks (MITM)
+   - Can attempt on-path attacks (MITM)
 
 3. **Compromised Node**
    - An endpoint (laptop, server) is fully compromised
-   - Attacker has access to node’s private key and config
+   - Attacker has access to node's private key and config
 
 4. **Malicious Participant**
    - Legitimate credentials, but behaves badly in the overlay
@@ -41,11 +41,11 @@ We assume the following potential adversaries:
    - ISP, cloud provider hosting gateways or bootstrap nodes
    - Can see source/destination IPs and traffic timing, but not contents
 
-### 9.1.2 Non‑Goals
+### 9.1.2 Non-Goals
 
 We **do not** aim to defend against:
-- Global passive adversaries capable of large‑scale traffic correlation
-- Nation‑state actors targeting individuals over long time horizons
+- Global passive adversaries capable of large-scale traffic correlation
+- Nation-state actors targeting individuals over long time horizons
 - Local compromise of the endpoints themselves (if your laptop is owned, all bets are off)
 
 For those threat models, systems like Tor and specialized hardened OSes are more appropriate.
@@ -91,7 +91,7 @@ Every QUIC connection is protected by TLS 1.3.
 
 - Each side presents a certificate containing its public key
 - Certificates may be:
-  - Self‑signed (small/private networks)
+  - Self-signed (small/private networks)
   - Signed by an internal CA (enterprise networks)
 
 Verification steps:
@@ -124,11 +124,11 @@ QuicEther does **not** hardcode a single PKI model; it exposes flexible hooks.
 
 ---
 
-## 9.3 Authorization & Zero‑Trust Policy
+## 9.3 Authorization & Zero-Trust Policy
 
 Authentication says **who** you are. Authorization answers **what** you can access.
 
-### 9.3.1 Zero‑Trust Principle
+### 9.3.1 Zero-Trust Principle
 
 Default stance:
 - **Deny by default, allow by policy**
@@ -139,9 +139,9 @@ Default stance:
 QuicEther implements two complementary policy engines, validated in httpf:
 
 **Firewall Engine** (Proxmox-style ACL):
-- Per-hub packet filtering rules
+- Per-hub frame/packet filtering rules (L2 MAC + L3/L4 IP/port)
 - First-match evaluation order
-- Supports: allow/deny, src/dst IP, port, protocol, ICMP type
+- Supports: allow/deny, src/dst MAC, src/dst IP, port, protocol, ICMP type
 
 ```toml
 # Firewall rules (first match wins)
@@ -166,7 +166,7 @@ dst = "0.0.0.0/0"
 comment = "Default deny"
 ```
 
-**Policy Engine** (per-identity L3/L4 rules):
+**Policy Engine** (per-identity L2/L3/L4 rules):
 
 ```toml
 # /etc/quicether/policy.toml
@@ -221,7 +221,7 @@ This aligns with enterprise practices (firewalls, IAM systems).
 
 ### 9.3.4 Groups and Roles
 
-To avoid per‑node explosion in large deployments:
+To avoid per-node explosion in large deployments:
 
 - Nodes can belong to **groups** (e.g., `developers`, `sales`, `admins`)
 - Policies can target groups instead of individual nodes
@@ -242,7 +242,7 @@ members = ["node_maria_laptop", "node_remote_sales1"]
 
 All traffic across QuicEther tunnels is encrypted:
 - Control plane (mesh protocol, control streams)
-- Data plane (encapsulated IP packets via PacketBatch)
+- Data plane (encapsulated Ethernet frames via FrameBatch)
 
 There is **no plaintext mode**.
 
@@ -270,7 +270,7 @@ Properties:
 ### 9.4.3 Forward Secrecy
 
 TLS 1.3 provides forward secrecy via ephemeral key exchange:
-- Compromise of long‑term keys does **not** automatically allow decryption of past sessions
+- Compromise of long-term keys does **not** automatically allow decryption of past sessions
 - However, a live compromised node can of course see its current plaintext traffic
 
 ---
@@ -311,7 +311,7 @@ Logs can be shipped to:
 
 We **never** log:
 - Packet payloads
-- Application‑level data (HTTP paths, SQL queries, etc.)
+- Application-level data (HTTP paths, SQL queries, etc.)
 
 We aim for:
 - Enough metadata for troubleshooting and compliance
@@ -325,7 +325,7 @@ We aim for:
 
 On each node:
 - Private key stored on disk, ideally:
-  - File permissions: owner‑only
+  - File permissions: owner-only
   - Optionally encrypted at rest (passphrase, OS keyring, TPM)
 
 Location example:
@@ -376,10 +376,10 @@ Mitigations:
 - Strong hardening (OS, firewall, minimal services)
 - Strict policy on what hubs allow and for whom
 - Rate limiting (token bucket per identity) to prevent abuse
-- Anti-spoofing on virtual NAT (reject packets with wrong source IP)
+- Anti-spoofing on Virtual Hub (reject frames with wrong source MAC)
 - Robust monitoring and alerting via Prometheus metrics + audit logs
 
-Note: Servers see IP metadata but the QUIC tunnel between client and server provides encryption. For cross-hub traffic via mesh, servers only route PacketBatch payloads.
+Note: Servers see connection metadata but the QUIC tunnel between client and server provides encryption. For cross-hub traffic via mesh, servers only forward FrameBatch payloads.
 
 ---
 
@@ -390,7 +390,7 @@ QuicEther should integrate with, not replace, existing security frameworks.
 ### 9.8.1 Firewalls
 
 - QuicEther typically listens on a single UDP port (e.g., 443/udp or 51820/udp)
-- Per‑subnet and per‑host controls still enforced by local firewalls behind QuicEther
+- Per-hub and per-host controls still enforced by local firewalls behind QuicEther
 
 ### 9.8.2 IDS/IPS
 
@@ -412,26 +412,26 @@ Mapping back to Chapter 3 personas:
 
 - **Sarah (Developer):**
   - Needs secure remote access without complex VPN configs
-  - Benefit: TLS 1.3 by default, zero‑trust policy defined by her employer
+  - Benefit: TLS 1.3 by default, zero-trust policy defined by her employer
 
 - **James (Small Business Owner):**
   - Needs simple but robust security
-  - Benefit: Default‑deny rules with clear allowlists for office resources
+  - Benefit: Default-deny rules with clear allowlists for office resources
 
 - **Alex (Homelab Enthusiast):**
   - Wants to expose services safely to friends
-  - Benefit: Node‑based policies instead of port‑knocking hacks
+  - Benefit: Node-based policies instead of port-knocking hacks
 
 - **Maria (Digital Nomad):**
   - Needs to trust WiFi networks as little as possible
-  - Benefit: End‑to‑end encryption over any network, no plaintext
+  - Benefit: End-to-end encryption over any network, no plaintext
 
 - **Priya (Rural User):**
   - Primary concern: reliability and cost, but still benefits from strong defaults
 
 - **David (Enterprise IT):**
   - Needs auditability, compliance, centralized policy
-  - Benefit: First‑class IAM‑like controls, logs, and integration points
+  - Benefit: First-class IAM-like controls, logs, and integration points
 
 ---
 
@@ -458,7 +458,7 @@ This chapter defined QuicEther's security model (grounded in httpf's implementat
 
 - **Identity:** Ed25519 keypairs, NodeId derived via BLAKE3
 - **Authentication:** Three-tier model (Ed25519 + Password/Argon2id + Service Tokens)
-- **Authorization:** Zero-trust with dual engines — Firewall (Proxmox-style ACL) + Policy (per-identity L3/L4)
+- **Authorization:** Zero-trust with dual engines — Firewall (Proxmox-style ACL, L2/L3/L4) + Policy (per-identity MAC/IP/port)
 - **Confidentiality:** ChaCha20-Poly1305/X25519, encrypted by default, no plaintext mode
 - **Audit:** JSONL structured logs + syslog + Prometheus metrics
 - **Operations:** Clear guidance on key management, rotation, and server hardening
@@ -466,7 +466,7 @@ This chapter defined QuicEther's security model (grounded in httpf's implementat
 
 QuicEther aims to be **safe by default**, while remaining flexible enough for small labs and large enterprises alike.
 
-**Next Chapter:** We will focus on the VPN interface and packet handling (L3 overlay, routing, and interaction with OS networking).
+**Next Chapter:** We will focus on the Virtual Hub, TAP interface, and Ethernet bridging (L2 overlay and interaction with OS networking).
 
 ---
 

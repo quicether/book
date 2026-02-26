@@ -8,7 +8,7 @@ We cover:
 - QUIC connection model (sessions, streams, migration)
 - Packet format as seen by QuicEther
 - Multipath design (paths, schedulers, monitoring)
-- Interaction with the TUN interface and routing
+- Interaction with the TAP interface and bridging
 - Failure handling and performance considerations
 
 ---
@@ -35,8 +35,8 @@ We conceptually structure streams as:
 | Stream Type | Direction | Purpose |
 |------------|-----------|---------|
 | Control    | Bi-dir    | Authentication, keepalives, config negotiation, heartbeats |
-| Data       | Uni-dir   | Encapsulated IP packets (PacketBatch tunnel traffic) |
-| Mesh       | Bi-dir    | Server mesh protocol (hub updates, route sync) |
+| Data       | Uni-dir   | Encapsulated Ethernet frames (FrameBatch tunnel traffic) |
+| Mesh       | Bi-dir    | Server mesh protocol (hub updates, MAC sync) |
 | Metrics    | Uni-dir   | Optional stats, monitoring, audit events |
 
 Implementation detail:
@@ -62,7 +62,7 @@ QuicEther leverages this to support:
 From QuicEther’s perspective:
 
 ```text
-[IP packet from TUN]
+[Ethernet frame from TAP]
           ↓ encapsulated
 [QUIC STREAM frame payload]
           ↓ encrypted
@@ -72,37 +72,37 @@ From QuicEther’s perspective:
 ```
 
 We do **not** define a new VPN protocol from scratch. Instead, we:
-- Treat each IP packet (or small batch) as the payload of a QUIC stream frame
+- Treat each Ethernet frame (or small batch) as the payload of a QUIC stream frame
 - Optionally add a small header for metadata (e.g., QoS flags, flow ID)
 
-### 8.2.2 PacketBatch Format (Proven in httpf)
+### 8.2.2 FrameBatch Format (Proven in httpf)
 
-Instead of sending one IP packet per QUIC frame, QuicEther uses a **PacketBatch** format validated in httpf for amortizing per-frame overhead:
+Instead of sending one Ethernet frame per QUIC frame, QuicEther uses a **FrameBatch** format validated in httpf for amortizing per-frame overhead:
 
 ```text
 +----------------+--------+------------------+--------+------------------+-----+
-| num_packets:u16| size:u16| IP Packet 1      | size:u16| IP Packet 2      | ... |
+| num_frames:u16 | size:u16| Ethernet Frame 1 | size:u16| Ethernet Frame 2 | ... |
 +----------------+--------+------------------+--------+------------------+-----+
 ```
 
 ```rust
-struct PacketBatch {
-    num_packets: u16,
-    packets: Vec<SizedPacket>,
+struct FrameBatch {
+    num_frames: u16,
+    frames: Vec<SizedFrame>,
 }
 
-struct SizedPacket {
-    size: u16,       // Length of the IP packet
-    data: Vec<u8>,   // Raw IP packet bytes
+struct SizedFrame {
+    size: u16,       // Length of the Ethernet frame
+    data: Vec<u8>,   // Raw Ethernet frame bytes
 }
 ```
 
 Design rationale:
-- **Batching** reduces per-packet QUIC frame overhead
+- **Batching** reduces per-frame QUIC stream overhead
 - **No version/flags header** — QUIC already provides framing, encryption, and ordering
-- **Simple `size:u16` prefix** per packet enables zero-copy parsing
+- **Simple `size:u16` prefix** per frame enables zero-copy parsing
 - **LZ4 compression** applied to the entire batch payload before QUIC encryption
-- httpf proved that batching 4-8 packets per frame improves throughput by ~15-20%
+- httpf proved that batching 4-8 frames per QUIC stream write improves throughput by ~15-20%
 
 ---
 
@@ -128,14 +128,14 @@ Scenario: Client A connects to Server S.
      - **Service token** — pre-shared key for server mesh peers
    - Server validates and assigns client to a hub
 
-4. **Hub Assignment & IP Allocation:**
-   - Server assigns virtual IP from hub's CIDR pool
-   - Sends hub configuration (allowed routes, DNS, firewall rules)
-   - Data streams are opened for PacketBatch tunnel traffic
+4. **Hub Assignment & TAP Setup:**
+   - Server assigns client a MAC address and adds to Virtual Hub
+   - Sends hub configuration (MTU, firewall rules)
+   - Data streams are opened for FrameBatch tunnel traffic
 
 5. **Ready State:**
-   - Client configures TUN interface with assigned IP
-   - Bidirectional tunnel is established
+   - Client configures TAP interface
+   - Bidirectional Ethernet tunnel is established
 
 ### 8.3.2 Maintaining a Connection
 
@@ -146,7 +146,7 @@ Scenario: Client A connects to Server S.
 ### 8.3.3 Tearing Down
 
 - Graceful:
-  - QUIC CLOSE frame, flush pending packets
+  - QUIC CLOSE frame, flush pending frames
 - Ungraceful:
   - Timeouts, error conditions; both sides clean up local state
 
@@ -211,13 +211,13 @@ We use flexible schedulers (Chapter 5 introduced them, here we detail behavior):
 
 #### 8.4.3.1 Round-Robin
 
-- Simplest: cycle through active paths per packet or per batch
+- Simplest: cycle through active paths per frame or per batch
 - Good for paths with similar RTT and bandwidth
 
 #### 8.4.3.2 Weighted
 
 - Each path has a weight proportional to estimated bandwidth
-- Scheduler sends packets such that long-term proportion matches weights
+- Scheduler sends frames such that long-term proportion matches weights
 
 ```rust
 struct WeightedScheduler {
@@ -246,7 +246,7 @@ impl Scheduler for WeightedScheduler {
 
 #### 8.4.3.4 Redundant (for Critical Traffic)
 
-- Certain packets (e.g., small control or interactive voice) can be sent on **multiple paths simultaneously** to reduce perceived latency
+- Certain frames (e.g., small control or interactive voice) can be sent on **multiple paths simultaneously** to reduce perceived latency
 
 Trade-off:
 - Higher bandwidth cost for increased reliability/latency improvement
@@ -260,7 +260,7 @@ httpf validated four named profiles that map to scheduler configurations:
 | `latency` | Latency-Aware | Prefer lowest-RTT path, backup only on failure |
 | `balanced` | Weighted | Distribute across paths proportional to bandwidth |
 | `throughput` | Weighted + Aggressive | Maximize aggregate bandwidth, tolerate reordering |
-| `max_performance` | All paths + Redundant | Use every path, duplicate critical packets |
+| `max_performance` | All paths + Redundant | Use every path, duplicate critical frames |
 
 ```toml
 [transport]
@@ -280,27 +280,27 @@ Mitigations:
 
 Congestion control:
 - We rely primarily on QUIC’s per-path congestion control mechanisms (as provided by library)
-- Scheduler should consider congestion feedback when assigning packets
+- Scheduler should consider congestion feedback when assigning frames
 
 ---
 
-## 8.5 Integration with TUN & Routing
+## 8.5 Integration with TAP & Bridging
 
 ### 8.5.1 Outbound Path
 
-1. Application writes packet → kernel routes to TUN `quicether0`
-2. QuicEther reads IP packet from TUN
-3. Routing table determines destination (server or mesh peer)
+1. Application writes to socket → kernel builds Ethernet frame → TAP `quicether0`
+2. QuicEther reads Ethernet frame from TAP
+3. All frames go through QUIC tunnel to server (Virtual Hub)
 4. Connection manager selects existing QUIC connection to server
-5. Multipath scheduler chooses active path for this packet
-6. Packet encapsulated and sent via QUIC
+5. Multipath scheduler chooses active path for this frame
+6. Frame encapsulated and sent via QUIC
 
 ### 8.5.2 Inbound Path
 
 1. QUIC receives encapsulated payload on any path
-2. QuicEther decrypts & decapsulates to original IP packet
-3. If destination IP is local → write to TUN
-4. Else → server re-consults routing table and forwards via hub or mesh peer
+2. QuicEther decrypts & decapsulates to original Ethernet frame
+3. Write to TAP (kernel delivers to local application)
+4. On server side: Virtual Hub switches frame by destination MAC
 
 Interaction detail:
 - Routing layer does not care which path was used; it only deals with logical connection
@@ -364,9 +364,9 @@ Compared to kernel VPNs (e.g., WireGuard):
   - LZ4 compression/decompression cost
 
 Mitigations (validated in httpf):
-- **PacketBatch** — amortize per-packet overhead by batching 4-8 packets per QUIC frame
+- **FrameBatch** — amortize per-frame overhead by batching 4-8 Ethernet frames per QUIC stream write
 - **LZ4 compression** — fast compression reduces bytes on wire; net win for most traffic
-- Batch reads/writes from TUN via `sendmmsg`/`recvmmsg` where applicable
+- Batch reads/writes from TAP via `sendmmsg`/`recvmmsg` where applicable
 - Use send/recv buffers tuned to NIC and MTU
 - Use Rust with `tokio` and async I/O for high concurrency
 
@@ -376,7 +376,7 @@ Mitigations (validated in httpf):
 - QUIC + encapsulation overhead reduces effective MTU for tunneled IP
 
 Strategy:
-- TUN MTU configured to something like 1420 bytes
+- TAP MTU configured to something like 1420 bytes (accounts for Ethernet + QUIC overhead)
 - Encourage Path MTU Discovery on QUIC side
 - Avoid IP fragmentation in the overlay
 
@@ -388,7 +388,7 @@ Target:
 Approaches:
 - Parallelism: multiple cores handling independent flows
 - Lock-free data structures where appropriate
-- Avoid per-packet heap allocations
+- Avoid per-frame heap allocations
 
 ---
 
@@ -479,7 +479,7 @@ bulk_min_bandwidth_mbps = 5
 
 In this chapter we:
 - Described how QuicEther uses QUIC connections and streams for client-server tunneling
-- Detailed the **PacketBatch** encapsulation format (proven in httpf)
+- Detailed the **FrameBatch** encapsulation format (proven in httpf)
 - Designed a multipath layer with paths, schedulers, and **performance profiles**
 - Explained server-based connection lifecycle with three-tier authentication
 - Covered failure handling and performance considerations

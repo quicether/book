@@ -23,15 +23,15 @@ We use multiple layers of testing:
 
 1. **Unit tests:**
    - Small, fast, deterministic
-   - Validate pure logic (routing tables, hub management, firewall engine, policy engine)
+   - Validate pure logic (MAC learning table, hub management, firewall engine, policy engine)
 
 2. **Integration tests:**
    - Multiple components within one process
-   - e.g., auth + session manager, firewall + router, policy + router
+   - e.g., auth + session manager, firewall + switch, policy + switch
 
 3. **System tests (multi-node):**
    - Server + multiple clients, simulated or real
-   - Exercise full flows: connect → authenticate → assign hub → route → policy
+   - Exercise full flows: connect → authenticate → join hub → switch frames → policy
 
 4. **Performance tests:**
    - Throughput, latency, CPU usage
@@ -46,47 +46,50 @@ We use multiple layers of testing:
 ### 13.2.1 Targets
 
 - Hub manager:
-  - IP pool allocation/deallocation
-  - CIDR range exhaustion handling
+  - MAC table learning and aging
+  - MAC table limit enforcement
 - Session manager:
   - Session lifecycle (create, track, destroy)
   - Concurrent session limits
 - Firewall engine:
   - Rule matching (allow/deny, first-match)
-  - Port ranges, protocol filtering
+  - L2/L3/L4 filtering (MAC, IP, port)
 - Policy engine:
   - Per-identity rule matching
   - Group membership resolution
-- Routing:
-  - Longest-prefix match
-  - Local vs Server vs Bridge vs MeshPeer precedence
+- MAC switching:
+  - Exact MAC lookup
+  - Unknown unicast flooding
+  - Broadcast/multicast flooding
 - Auth:
   - Password verification (Argon2id)
   - Ed25519 signature validation
   - Service token matching
 - Config loader:
   - Precedence (defaults, file, env, flags)
-- Virtual NAT:
-  - Anti-spoofing validation
-  - IP assignment correctness
+- Virtual Hub:
+  - Anti-spoofing MAC validation
+  - MAC-per-port limits
 
 ### 13.2.2 Tooling
 
-- Rust’s built‑in `cargo test`
-- `proptest` or `quickcheck` for property‑based tests where useful
+- Rust's built-in `cargo test`
+- `proptest` or `quickcheck` for property-based tests where useful
 
-Example (routing longest‑prefix match):
+Example (MAC table learning and lookup):
 
 ```rust
 #[test]
-fn longest_prefix_match_prefers_more_specific_route() {
-    let mut table = OverlayRoutingTable::new();
-    table.add("10.0.0.0/8", RouteNextHop::Node(node_a()));
-    table.add("10.0.1.0/24", RouteNextHop::Node(node_b()));
+fn mac_table_learns_and_forwards() {
+    let mut table = MacTable::new(Duration::from_secs(300), 8192);
 
-    let dest: IpAddr = "10.0.1.42".parse().unwrap();
-    let nh = table.lookup(dest).unwrap();
-    assert_eq!(nh, RouteNextHop::Node(node_b()));
+    let mac_a = MacAddress::from([0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x01]);
+    let port_1 = SwitchPort::Session(session_1());
+
+    table.learn(mac_a, port_1.clone());
+
+    let result = table.lookup(mac_a);
+    assert_eq!(result, Some(port_1));
 }
 ```
 
@@ -94,28 +97,28 @@ fn longest_prefix_match_prefers_more_specific_route() {
 
 ## 13.3 Integration Tests
 
-Integration tests combine multiple modules in‑process.
+Integration tests combine multiple modules in-process.
 
 ### 13.3.1 Examples
 
 - **Auth + Session Manager:**
   - Configure three-tier auth
   - Simulate client connections
-  - Verify session creation and IP assignment
+  - Verify session creation and hub membership
 
-- **Router + Firewall + Policy:**
+- **Switch + Firewall + Policy:**
   - Configure hubs, firewall rules, and policies
-  - Feed in synthetic packets
-  - Verify allow/deny + correct routing decisions
+  - Feed in synthetic Ethernet frames
+  - Verify allow/deny + correct switching decisions
 
-- **QUIC Transport + PacketBatch:**
+- **QUIC Transport + FrameBatch:**
   - Spin up QUIC endpoints in test
-  - Send PacketBatch-encapsulated IP packets
+  - Send FrameBatch-encapsulated Ethernet frames
   - Confirm they emerge intact on the other side
 
 - **Mesh Protocol:**
-  - Two servers exchange hub updates
-  - Verify route table synchronization
+  - Two servers exchange hub membership updates
+  - Verify MAC forwarding table synchronization
 
 ### 13.3.2 Layout
 
@@ -127,11 +130,11 @@ Integration tests combine multiple modules in‑process.
 
 ---
 
-## 13.4 System Tests (Multi‑Node)
+## 13.4 System Tests (Multi-Node)
 
-System tests validate real‑world scenarios.
+System tests validate real-world scenarios.
 
-### 13.4.1 Local Multi‑Node with Docker Compose
+### 13.4.1 Local Multi-Node with Docker Compose
 
 Use `docker-compose` to simulate a small network:
 
@@ -163,7 +166,7 @@ networks:
 
 Tests scripted with:
 - `docker-compose up -d`
-- Run `quicether` CLI to inspect sessions/routes
+- Run `quicether` CLI to inspect sessions/MAC table
 - Run `ping`/`iperf` between client containers via overlay
 
 ### 13.4.2 Specific Scenarios
@@ -172,14 +175,14 @@ Tests scripted with:
    - Server + client
    - Verify:
      - QUIC connection + TLS 1.3 auth
-     - Hub assignment + virtual IP
+     - Hub join + DHCP through tunnel
      - Ping + SSH over overlay
 
 2. **Site-to-Site:**
-   - Two servers with mesh, distinct hub subnets
+   - Two servers with mesh, distinct hubs bridged to physical LANs
    - Validate:
      - Mesh peer connection
-     - Cross-hub routing
+     - Cross-hub frame forwarding
      - Client-to-client communication across servers
 
 3. **Multipath:**
@@ -214,7 +217,7 @@ We care about:
    - One interface, direct connection
    - Measure baseline overhead vs plain TCP/UDP
 
-2. **Multi‑Path Aggregation:**
+2. **Multi-Path Aggregation:**
    - 2–4 paths with controlled bandwidth limits
    - Confirm effective throughput approaches target (≥80% of sum)
 
@@ -253,7 +256,7 @@ Validation:
 - Kill `quicether` process on one node abruptly
 - Observe behavior on peers:
   - Time to detect failure
-  - How quickly routes are updated
+  - How quickly MAC tables are updated
 
 ### 13.6.3 Mesh Partitions
 
@@ -261,7 +264,7 @@ Validation:
 - Validate:
   - Existing client sessions continue on their server
   - Cross-hub traffic fails gracefully during partition
-  - Routes re-converge when partition heals
+  - MAC tables re-converge when partition heals
 
 ---
 
@@ -276,7 +279,7 @@ Validation:
 
 Targets:
 - QUIC handshake message parsing
-- PacketBatch parsing
+- FrameBatch parsing
 - Config file parsing
 - Firewall rule parsing
 - Policy rule parsing
@@ -291,7 +294,7 @@ Tools:
   - TLS usage and key handling
   - Auth bypass attempts (all three tiers)
   - Firewall rule bypass attempts
-  - IP spoofing against virtual NAT
+  - MAC spoofing against Virtual Hub
   - Mesh protocol injection
 
 ---
@@ -306,8 +309,8 @@ Every push/PR should trigger:
 - `cargo test` (unit + small integration)
 
 Nightly or scheduled jobs:
-- Extended integration tests (multi‑node via docker)
-- Fuzzing runs (time‑bounded)
+- Extended integration tests (multi-node via docker)
+- Fuzzing runs (time-bounded)
 
 ### 13.8.2 Release Validation
 
@@ -324,25 +327,25 @@ Artifacts:
 
 ## 13.9 Mapping Tests to Personas
 
-To ensure we don’t miss real‑world workflows:
+To ensure we don't miss real-world workflows:
 
 - **Sarah (Developer):**
   - Remote access tests
   - Roaming tests (WiFi ↔ wired)
 
 - **James (Small Business):**
-  - Site‑to‑site tests
+  - Site-to-site tests
   - Policy tests (departmental segmentation)
 
 - **Alex (Homelab):**
-  - Multi‑node mesh tests
+  - Multi-node mesh tests
   - Multipath experiments
 
 - **Maria (Nomad):**
   - Multipath + captive portal edge cases
 
 - **Priya (Rural):**
-  - Multi‑ISP aggregation under varying path quality
+  - Multi-ISP aggregation under varying path quality
 
 - **David (Enterprise):**
   - Audit log completeness
@@ -358,7 +361,7 @@ This chapter defined how we will validate QuicEther:
 - CI/CD practices carried forward from httpf
 - Security testing including fuzzing, static analysis, and penetration testing
 
-Testing is not a one‑time phase; it is an ongoing process built into every milestone of the implementation roadmap.
+Testing is not a one-time phase; it is an ongoing process built into every milestone of the implementation roadmap.
 
 **Next Chapter:** We will describe **deployment and operations playbooks**—how to actually run QuicEther in different environments.
 

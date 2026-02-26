@@ -92,19 +92,19 @@ QuicEther uses separate config files for server and client roles:
 # Client authentication method
 
 [network]
-# TUN device, MTU, encryption, multipath
+# TAP device, MTU, encryption, multipath
 
 [performance]
 # Batching profile and tuning
 
 [routing]
-# Split tunnel, full tunnel, route rules
+# Full tunnel toggle
 
 [reconnect]
 # Auto-reconnect behavior
 
 [bridge]
-# Bridge mode (optional — advertise LAN subnets)
+# Local Bridge mode (optional — bridge physical LAN to hub)
 
 [proxy]
 # Client-side proxy (optional — tunnel through SOCKS5/HTTP)
@@ -167,19 +167,28 @@ admin_listen = "127.0.0.1"          # Admin bind address (default "127.0.0.1")
 
 ## 15.5 Server: `[[hubs]]` Section
 
-Defines virtual networks. A server can host multiple hubs for multi-tenancy.
+Defines virtual networks (Ethernet segments). A server can host multiple hubs for multi-tenancy.
 
 ```toml
 [[hubs]]
 name = "default"                     # Hub name (string, required)
-subnet = "10.20.0.0/24"             # IPv4 CIDR for IP allocation (required)
-gateway = "10.20.0.1"               # Gateway IP (default: first IP in subnet)
 session_timeout_secs = 60           # Idle session timeout (default: 60)
-virtual_nat = true                   # Enable DNS + NAT for outbound (default: true)
+max_sessions = 253                   # Max concurrent sessions (default: 253)
+max_macs_per_port = 16               # MAC limit per session (default: 16)
+mac_aging_secs = 300                 # MAC table entry timeout (default: 300)
 
-# IPv6 dual-stack (optional)
-subnet_v6 = "fd00:20::/64"
-gateway_v6 = "fd00:20::1"
+# Local Bridge (optional — connect physical LAN to this hub)
+[hubs.local_bridge]
+interface = "eth0"                   # Physical interface to bridge
+
+# SecureNAT (optional — built-in DHCP/NAT when no physical router)
+[hubs.secure_nat]
+enabled = false                      # Default: false (physical router preferred)
+dhcp_start = "10.100.0.100"          # DHCP range start
+dhcp_end = "10.100.0.200"            # DHCP range end
+gateway = "10.100.0.1"               # Virtual gateway IP
+subnet_mask = "255.255.255.0"        # Subnet mask
+dns = ["1.1.1.1", "8.8.8.8"]         # DNS servers
 
 # MSS clamping
 mss_clamp = 1360                     # Explicit MSS value (optional)
@@ -193,118 +202,77 @@ allowed_groups = ["engineering"]
 
 - `name` (string, required):
   - Unique hub identifier. Clients specify this in `[server].hub`.
-
-- `subnet` (CIDR string, required):
-  - IPv4 pool for client IP assignment.
-  - Example: `"10.20.0.0/24"` provides 253 usable addresses.
-
-- `gateway` (string, optional):
-  - Default: first usable IP in subnet.
+  - Each hub is an independent broadcast domain (like a VLAN).
 
 - `session_timeout_secs` (integer):
   - Default: `60`. Sessions idle longer are disconnected.
 
-- `virtual_nat` (bool):
-  - Default: `true`. Server creates TUN device and handles routing/NAT.
+- `max_sessions` (integer):
+  - Default: `253`. Maximum concurrent client sessions in this hub.
 
-- `subnet_v6` / `gateway_v6` (string, optional):
-  - ULA (RFC 4193) addresses for dual-stack IPv6 support.
+- `max_macs_per_port` (integer):
+  - Default: `16`. Maximum MAC addresses learned per session/bridge.
+  - Prevents MAC flooding attacks.
 
-- `mss_clamp` / `mss_clamp_auto`:
-  - Prevents TCP fragmentation by adjusting MSS in SYN packets.
+- `mac_aging_secs` (integer):
+  - Default: `300`. MAC table entries expire after this duration.
+
+- `[hubs.local_bridge]` (optional):
+  - `interface`: Physical network interface to bridge into this hub.
+  - All Ethernet frames from the physical interface flow into the Virtual Hub.
+  - DHCP, ARP, broadcast traffic pass through transparently.
+
+- `[hubs.secure_nat]` (optional):
+  - Default: disabled. Only enable when no physical router is available.
+  - Provides built-in DHCP server and virtual gateway within the hub.
+  - `dhcp_start` / `dhcp_end`: IP range for DHCP leases.
+  - `gateway`: Virtual gateway IP for internet access.
+  - `dns`: DNS servers to assign via DHCP.
 
 ### 15.5.1 Hub Firewall Rules
 
-Proxmox-style firewall rules evaluated in order (first match wins):
+Proxmox-style firewall rules evaluated in order (first match wins). Rules can match at L2 (MAC), L3 (IP), and L4 (port):
 
 ```toml
 [[hubs.firewall]]
 enable = true
 direction = "in"                     # "in" | "out"
-action = "ACCEPT"                    # "ACCEPT" | "DROP" | "REJECT" | "DNAT" | "SNAT"
+action = "ACCEPT"                    # "ACCEPT" | "DROP" | "REJECT"
 protocol = "tcp"                     # "tcp" | "udp" | "icmp" | "all"
 dest_port = 22
 name = "allow-ssh"
 
-# DNAT (port forwarding):
+# MAC-based rule (L2 filtering):
 [[hubs.firewall]]
 enable = true
 direction = "in"
-action = "DNAT"
-protocol = "tcp"
-dest_port = 8080
-forward_ip = "10.20.0.5"
-forward_port = 80
-name = "web-forward"
+action = "DROP"
+src_mac = "aa:bb:cc:*"               # Wildcard MAC match
+name = "block-rogue-mac-range"
 
-# SNAT (source NAT / masquerade):
+# IP-based rule (L3 filtering, applied to frame payload):
 [[hubs.firewall]]
 enable = true
 direction = "out"
-action = "SNAT"
+action = "ACCEPT"
 protocol = "all"
-masquerade_ip = "10.20.0.1"
-name = "masquerade-outbound"
+src_ip = "192.168.1.0/24"
+name = "allow-lan-outbound"
 ```
 
 Rule fields:
 - `enable` (bool): Enable/disable without deletion (default: true)
 - `direction` (string): `"in"` or `"out"`
-- `action` (string): `"ACCEPT"`, `"DROP"`, `"REJECT"`, `"DNAT"`, `"SNAT"`
-- `protocol` (string): `"tcp"`, `"udp"`, `"icmp"`, `"all"`
-- `src_ip` / `dest_ip` (string, optional): CIDR match
+- `action` (string): `"ACCEPT"`, `"DROP"`, `"REJECT"`
+- `protocol` (string): `"tcp"`, `"udp"`, `"icmp"`, `"arp"`, `"all"`
+- `src_mac` / `dest_mac` (string, optional): MAC address match (supports `*` wildcards)
+- `src_ip` / `dest_ip` (string, optional): CIDR match (parsed from frame payload)
 - `src_port` / `dest_port` (integer or range, optional): Port match
-- `forward_ip` / `forward_port` (for DNAT): Internal target
-- `masquerade_ip` (for SNAT): Rewrite source to this IP
 - `name` (string, optional): Human-readable name for logs
 
-### 15.5.2 Hub Routes
+### 15.5.2 Hub Policies
 
-Routes pushed to clients:
-
-```toml
-[[hubs.routes]]
-destination = "192.168.0.0/16"       # CIDR network to route
-metric = 100                         # Route priority (lower = preferred)
-```
-
-### 15.5.3 Hub Source-Based Routing
-
-Policy-based routing by source identity or IP:
-
-```toml
-[[hubs.source_routes]]
-source_identity = "admin"
-destination = "0.0.0.0/0"
-gateway = "secure-gw.internal"
-metric = 10
-
-[[hubs.source_routes]]
-source_ip = "10.100.200.0/24"
-destination = "0.0.0.0/0"
-gateway = "guest-gw.internal"
-metric = 50
-```
-
-### 15.5.4 Hub Outbound Proxy
-
-Route egress traffic through an upstream proxy:
-
-```toml
-[hubs.outbound_proxy]
-type = "socks5"                      # "socks5" | "http_connect"
-address = "proxy.example.com:1080"
-username = "user"
-password = "pass"
-proxy_all = true
-exclude = ["10.0.0.0/8", "192.168.0.0/16"]
-health_check_interval_secs = 30
-connect_timeout_secs = 10
-```
-
-### 15.5.5 Hub Policies
-
-Network policies for L4 firewall and per-identity ACLs:
+Per-identity L2/L3/L4 ACLs:
 
 ```toml
 [[hubs.policies]]
@@ -399,12 +367,12 @@ enabled = true
 
 [[mesh.peers]]
 url = "quic://node-2.example.com:4433"
-subnet = "10.20.2.0/24"
+hub = "default"
 token = "mesh-secret-token"
 
 [[mesh.peers]]
 url = "quic://node-3.example.com:4433"
-subnet = "10.20.3.0/24"
+hub = "default"
 token = "mesh-secret-token"
 ```
 
@@ -413,7 +381,7 @@ token = "mesh-secret-token"
 
 Peer fields:
 - `url` (string, required): QUIC URL of the peer server
-- `subnet` (string, required): CIDR subnet that peer owns
+- `hub` (string, required): Hub name to cascade (connect hubs across servers)
 - `token` (string, required): Shared authentication token
 
 > The `node_id` is derived automatically from `[server].public_url` hostname
@@ -514,18 +482,26 @@ password = "secret"
 
 ## 15.12 Client: `[network]` Section
 
-TUN device, encryption, and multipath settings.
+TAP device, encryption, and multipath settings.
 
 ```toml
 [network]
-mtu = 1400                           # TUN device MTU (576-9000, default 1400)
+device_mode = "auto"                  # Device mode: "auto" | "tap" | "virtual_tap"
+mtu = 1400                           # TAP device MTU (576-9000, default 1400)
 encryption = true                    # Data-plane ChaCha20-Poly1305 (default true)
 max_connections = 1                  # Parallel QUIC connections (1-32, default 1)
 ```
 
+- `device_mode` (string):
+  - Default: `"auto"` (auto-detect based on platform).
+  - `"auto"`: Use Native TAP where available (Linux, macOS, Windows), Virtual TAP elsewhere (iOS, Android, containers).
+  - `"tap"`: Force Native TAP. Fails on platforms without TAP support.
+  - `"virtual_tap"`: Force Virtual TAP (TUN + userspace L2↔L3 translation). Works on any platform with TUN support. Useful for testing or when TAP drivers are unavailable.
+  - See Chapter 10, Section 10.1.3 for the full Virtual TAP design.
+
 - `mtu` (integer):
   - Default: `1400`.
-  - QUIC MTU calculation: physical(1500) - UDP/IP(28) - QUIC overhead(~42) - margin(~30) = 1400.
+  - QUIC MTU calculation: physical(1500) - UDP/IP(28) - QUIC overhead(~42) - Ethernet header(14) - margin(~16) = 1400.
   - Valid range: 576 (minimum IPv4) to 9000 (jumbo frames).
 
 - `encryption` (bool):
@@ -604,32 +580,16 @@ immediate_flush = ["icmp"]
 
 ## 15.14 Client: `[routing]` Section
 
-Split and full tunnel configuration.
+Full tunnel configuration. In L2 mode, split-tunneling is based on whether the hub has a Local Bridge to a physical LAN.
 
 ```toml
 [routing]
-route_all_traffic = false            # Full tunnel (0.0.0.0/0 + ::/0)
-accept_pushed_routes = true          # Honor server-pushed routes (default: true)
-
-# Split tunnel — IPv4:
-include_ipv4 = ["10.0.0.0/8", "172.16.0.0/12"]
-exclude_ipv4 = ["192.168.1.0/24"]
-
-# Split tunnel — IPv6:
-include_ipv6 = ["fd00::/8"]
-exclude_ipv6 = ["fe80::/10"]
+route_all_traffic = false            # Full tunnel (default: false)
 ```
 
-Route evaluation order:
-1. Server-pushed routes (if `accept_pushed_routes = true`)
-2. `exclude_*` rules checked first (take precedence)
-3. `include_*` rules checked
-4. If `route_all_traffic = true`, default routes added
-
-- `route_all_traffic` (bool): Default `false`. When `true`, adds `0.0.0.0/0` and `::/0`.
-- `accept_pushed_routes` (bool): Default `true`. Honor routes from `[[hubs.routes]]`.
-- `include_ipv4` / `include_ipv6` (arrays): Subnets to route through VPN.
-- `exclude_ipv4` / `exclude_ipv6` (arrays): Subnets to bypass (direct).
+- `route_all_traffic` (bool): Default `false`. When `true`, all traffic goes through the overlay hub.
+  - Requires the hub to have a gateway (Local Bridge with router, or SecureNAT).
+  - When `false` (default), only traffic to devices on the bridged LAN flows through the tunnel.
 
 ---
 
@@ -653,11 +613,11 @@ max_backoff_ms = 60000               # Maximum retry delay (exponential backoff)
 
 ## 15.16 Client: `[bridge]` Section (Optional)
 
-Bridge mode — advertise local LAN subnets to other VPN clients.
+Local Bridge mode — bridge a physical LAN interface into the hub.
 
 ```toml
 [bridge]
-lan_subnets = ["192.168.1.0/24"]
+interface = "eth0"                   # Physical interface to bridge
 ```
 
 Start in bridge mode:
@@ -665,7 +625,9 @@ Start in bridge mode:
 quicether bridge --config client.toml
 ```
 
-- `lan_subnets` (array of CIDR strings): Local networks to advertise.
+- `interface` (string): Physical network interface to bridge into the hub.
+  - All Ethernet frames from this interface flow into the Virtual Hub.
+  - Remote clients can access devices on the physical LAN transparently.
 
 ---
 
@@ -749,7 +711,7 @@ quicether connect \
 ```bash
 quicether bridge \
   --config /etc/quicether/client.toml \
-  --lan-subnets 192.168.1.0/24
+  --bridge-interface eth0
 ```
 
 Full flag list: `quicether server --help`, `quicether connect --help`, `quicether bridge --help`.
@@ -770,7 +732,6 @@ private_key_path = "/etc/quicether/server.key"
 
 [[hubs]]
 name = "default"
-subnet = "10.20.0.0/24"
 ```
 
 ### 15.21.2 Minimal Client (Identity Auth)
@@ -813,7 +774,7 @@ method = "identity"
 private_key_path = "identity.key"
 
 [bridge]
-lan_subnets = ["192.168.1.0/24"]
+interface = "eth0"
 ```
 
 ### 15.21.5 Multi-Hub Server with Auth
@@ -831,11 +792,9 @@ private_key_path = "/etc/quicether/server.key"
 
 [[hubs]]
 name = "engineering"
-subnet = "10.20.1.0/24"
 
 [[hubs]]
 name = "guests"
-subnet = "10.20.2.0/24"
 session_timeout_secs = 30
 
 [auth.local]
@@ -874,19 +833,21 @@ private_key_path = "/etc/quicether/server.key"
 
 [[hubs]]
 name = "default"
-subnet = "10.20.1.0/24"
+
+[hubs.local_bridge]
+interface = "eth0"
 
 [mesh]
 enabled = true
 
 [[mesh.peers]]
 url = "quic://eu-west.vpn.example.com:4433"
-subnet = "10.20.2.0/24"
+hub = "default"
 token = "mesh-secret"
 
 [[mesh.peers]]
 url = "quic://ap-south.vpn.example.com:4433"
-subnet = "10.20.3.0/24"
+hub = "default"
 token = "mesh-secret"
 
 [logging]
@@ -901,9 +862,9 @@ This chapter provided a **reference** for QuicEther configuration:
 
 **Server config** (`server.toml`):
 - `[server]` — QUIC listener, TLS, admin API
-- `[[hubs]]` — Virtual networks with firewall, routes, source routing, outbound proxy
+- `[[hubs]]` — Virtual Hubs (Ethernet segments) with Local Bridge, SecureNAT, firewall, policies
 - `[auth]` — Three-tier: identity (Ed25519), local passwords (Argon2id), service tokens
-- `[mesh]` — Multi-server clustering with peer URLs and shared tokens
+- `[mesh]` — Multi-server clustering with cascade connections
 - `[audit]` — JSONL file + syslog forwarding
 - `[logging]` — Level and format
 
@@ -912,9 +873,9 @@ This chapter provided a **reference** for QuicEther configuration:
 - `[auth]` — Identity keypair or password
 - `[network]` — MTU, encryption, multipath
 - `[performance]` — Batching profiles (latency/balanced/throughput/maxperformance)
-- `[routing]` — Split/full tunnel with IPv4/IPv6 rules
+- `[routing]` — Full tunnel toggle
 - `[reconnect]` — Auto-reconnect with exponential backoff
-- `[bridge]` — Optional LAN subnet advertisement
+- `[bridge]` — Optional Local Bridge (physical LAN interface)
 - `[proxy]` — Optional SOCKS5/HTTP CONNECT upstream proxy
 - `[logging]` — Level and format
 

@@ -50,13 +50,13 @@ Company Office Network (10.0.0.0/16)
 ```bash
 # Company office — QuicEther server with hub
 quicether server --config company-server.toml
-# Hub "dev" with subnet 10.0.0.0/16, identity allowlist
+# Hub "dev" — virtual Ethernet segment bridged to office LAN
 
 # Sarah's laptop — QuicEther client
 quicether connect --server company-vpn.startup.com --hub dev
 
-# Automatically assigned VPN IP from hub pool
-# Routes 10.0.0.0/16 → via QUIC tunnel
+# Joins office Ethernet segment via QUIC tunnel
+# Gets IP from office DHCP server through the tunnel
 # Everything else → via local ISP (split-tunnel by default)
 ```
 
@@ -118,7 +118,7 @@ quicether server --config office.toml
 
 # Home offices — QuicEther in bridge mode
 quicether bridge --server main-office.example.com --hub office \
-  --advertise-subnet 192.168.2.0/24
+  --bridge-lan eth0  # bridges local LAN into the Virtual Hub
 
 # Remote workers — QuicEther clients
 quicether connect --server main-office.example.com --hub office
@@ -184,7 +184,7 @@ Cloud (Oracle Free Tier)
 ```bash
 # Home — Server with multipath
 quicether server --config home.toml
-# Hub "homelab" with subnet 192.168.1.0/24
+# Hub "homelab" — virtual Ethernet segment
 # Multipath enabled across eth0 (fiber) + eth1 (cable)
 
 # Colo — Server in mesh with home
@@ -264,7 +264,7 @@ Maria's Setup (traveling)
 ```bash
 # Home NAS — Server mode
 quicether server --config home-nas.toml
-# Hub "studio" with subnet 192.168.1.0/24
+# Hub "studio" — virtual Ethernet segment, bridged to home LAN
 
 # Maria's Laptop — Client with multipath
 quicether connect --server home-nas.example.com --hub studio \
@@ -351,7 +351,7 @@ quicether connect --server datacenter.example.com \
 # Cheap cloud VM as QuicEther server
 # (Hetzner: $5/month)
 quicether server --config datacenter.toml
-# Hub "priya" with NAT to internet
+# Hub "priya" with SecureNAT to internet
 ```
 
 **Path Quality Handling:**
@@ -417,19 +417,19 @@ Requirements:
 ```bash
 # HQ — Main server + mesh hub
 quicether server --config hq.toml
-# Hub "corp" with subnet 10.0.0.0/16
+# Hub "corp" — virtual Ethernet segment bridged to HQ LAN
 # Dual ISP multipath, firewall rules, policy engine
 # Audit logging to /var/log/quicether/audit.json
 
 # Factory — Server in mesh with HQ
 quicether server --config factory.toml
-# Hub "factory" with subnet 10.1.0.0/16
+# Hub "factory" — virtual Ethernet segment bridged to factory LAN
 # Mesh peer: HQ server
 # Triple ISP multipath
 
 # Warehouse — Server in mesh
 quicether server --config warehouse.toml
-# Hub "warehouse" with subnet 10.2.0.0/16
+# Hub "warehouse" — virtual Ethernet segment bridged to warehouse LAN
 
 # Sales team — Mobile clients
 quicether connect --server hq.example.com --hub corp
@@ -608,7 +608,7 @@ User impact: Slight slowdown, no interruption, no manual intervention
    - Must handle heterogeneous paths (different ISPs, latencies)
 
 4. **Policy Engine (James, David)**
-   - Must support subnet advertisement
+   - Must support LAN bridging across sites
    - Must enforce access control
    - Must provide audit logging
 

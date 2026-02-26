@@ -60,7 +60,7 @@ This chapter defines the **non-negotiable** principles and the **pragmatic trade
 
 ### Implementation
 - ✅ Servers connect to peers via QUIC tunnels using service tokens
-- ✅ Peer routing forwards packets between server subnets
+- ✅ Peer forwarding bridges Ethernet frames between connected hubs
 - ✅ Auto-reconnection with exponential backoff
 - ✅ No central coordinator — each server maintains its mesh peers
 - ✅ DHT can be added as optional future extension for P2P discovery
@@ -90,7 +90,7 @@ This chapter defines the **non-negotiable** principles and the **pragmatic trade
 ### Rationale
 - Problem: Traditional VPNs force all traffic through central server
 - Problem: Multi-hop adds latency
-- Insight: httpf proved cascade routing works for geographic and privacy routing
+- Insight: httpf proved cascade connections work for geographic and privacy routing
 
 ### Implementation
 - ✅ Clients connect directly to nearest/preferred server
@@ -166,7 +166,7 @@ Multipath must work even if:
 ### Implementation
 - ✅ `quicether server --config server.toml` → server running with hubs
 - ✅ `quicether connect --server vpn.example.com` → connected client
-- ✅ Sensible defaults (security on, NAT enabled, TLS enforced)
+- ✅ Sensible defaults (security on, bridging enabled, TLS enforced)
 - ✅ Advanced config available in TOML but not required
 
 ### Trade-Off
@@ -271,7 +271,7 @@ Layer 1: Authentication (Who are you?)
 Layer 2: Authorization (What can you access?)
   └─ Hub-based namespacing with identity allowlists
   └─ Firewall engine (Proxmox-style ACL)
-  └─ Policy engine: per-identity L3/L4 access control
+  └─ Policy engine: per-identity L2/L3/L4 access control (MAC, IP, port)
 
 Layer 3: Confidentiality (Encrypt everything)
   └─ TLS 1.3 via QUIC (mandatory)
@@ -347,9 +347,9 @@ Scenario 2: All paths fail
   → Enter "disconnected" state, retry forever
   → Log: "All paths down, retrying every 10s"
 
-Scenario 3: Peer misbehaves (sends invalid packets)
-  → Drop bad packets, rate-limit peer
-  → Log: "Peer <id> sent invalid packet, rate limited"
+Scenario 3: Peer misbehaves (sends invalid frames)
+  → Drop bad frames, rate-limit peer
+  → Log: "Peer <id> sent invalid frame, rate limited"
 
 Scenario 4: Out of memory
   → Reject new connections, keep existing ones
@@ -358,7 +358,7 @@ Scenario 4: Out of memory
 
 ### Never
 ❌ Crash on bad input (always validate)  
-❌ Silently drop packets (always log)  
+❌ Silently drop frames (always log)  
 ❌ Leak sensitive data in logs (always redact)
 
 ---
@@ -381,21 +381,21 @@ Scenario 4: Out of memory
 ### MVP Scope (Version 0.1)
 ```
 MUST HAVE (proven in httpf, port to QUIC):
-- Server mode with hubs, IP pools, virtual NAT
-- Client mode with TUN device and split/full tunnel
-- Bridge mode (client + subnet advertisement)
+- Server mode with Virtual Hubs (virtual Ethernet switches)
+- Client mode with TAP device and split/full tunnel
+- Bridge mode (client + LAN bridging into Virtual Hub)
 - Ed25519 identity auth + password auth + service tokens
 - Firewall engine (Proxmox-style ACL)
-- Policy engine (per-identity L3/L4 rules)
+- Policy engine (per-identity L2/L3/L4 rules)
 - Rate limiting (token bucket)
 - Audit logging (JSONL, syslog)
 - Server mesh (server-to-server QUIC tunnels)
-- Cascade routing (multi-hop)
+- Cascade connections (multi-hop)
 - Admin REST API
 - Single binary (server/client/bridge/admin)
 - QUIC transport with TLS 1.3
-- Packet batching with LZ4 compression
-- ChaCha20-Poly1305 per-packet encryption
+- Ethernet frame batching with LZ4 compression
+- ChaCha20-Poly1305 per-frame encryption
 - Performance profiles (latency/balanced/throughput/maxperformance)
 
 NICE TO HAVE (later):

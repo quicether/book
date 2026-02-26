@@ -53,23 +53,19 @@ Each builds on the same core binary and concepts.
 
    [[hubs]]
    name = "home"
-   subnet = "10.100.0.0/24"
    dns = ["1.1.1.1"]
+
+   [hubs.local_bridge]
+   interface = "eth0"
 
    [firewall]
    default_action = "deny"
 
    [[firewall.rules]]
    action = "allow"
-   src = "10.100.0.0/24"
-   dst = "192.168.1.0/24"
-   comment = "Allow access to home LAN"
-
-   [[firewall.rules]]
-   action = "allow"
-   src = "10.100.0.0/24"
-   dst = "10.100.0.0/24"
-   comment = "Allow intra-hub traffic"
+   src = "*"
+   dst = "*"
+   comment = "Allow all traffic within hub"
    ```
 
 3. Set password for clients:
@@ -121,7 +117,7 @@ Each builds on the same core binary and concepts.
 
 - One server with multiple hubs
 - Several devices (laptops, desktops, phones)
-- Optional bridge mode for exposing home LAN
+- Optional Local Bridge for exposing home LAN
 - Goal: unified access to services (Plex, dev VMs, etc.)
 
 ### 14.3.2 Topology
@@ -131,7 +127,7 @@ Cloud VPS (public IP)
   └─ quicether server (hub: "home", hub: "dev")
 
 Home LAN (192.168.1.0/24)
-  └─ bridge client (exposing home LAN)
+  └─ bridge client (Local Bridge to home LAN)
 
 Remote devices
   └─ laptops, phones (connect clients)
@@ -149,19 +145,17 @@ method = "password"
 
 [[hubs]]
 name = "home"
-subnet = "10.100.0.0/24"
 
 [[hubs]]
 name = "dev"
-subnet = "10.100.1.0/24"
 
 [firewall]
 default_action = "deny"
 
 [[firewall.rules]]
 action = "allow"
-src = "10.100.0.0/23"
-dst = "10.100.0.0/23"
+src = "*"
+dst = "*"
 comment = "Allow all hub traffic"
 ```
 
@@ -169,7 +163,7 @@ comment = "Allow all hub traffic"
 ```bash
 quicether bridge \
   --server vps.example.com:4433 \
-  --local-subnet 192.168.1.0/24
+  --bridge-interface eth0
 ```
 
 Operations:
@@ -198,7 +192,9 @@ Operations:
 
    [[hubs]]
    name = "hq"
-   subnet = "10.0.0.0/24"
+
+   [hubs.local_bridge]
+   interface = "eth0"
 
    [mesh]
    enabled = true
@@ -217,15 +213,9 @@ Operations:
 
    [[firewall.rules]]
    action = "allow"
-   src = "10.0.0.0/24"
-   dst = "10.1.0.0/24"
-   comment = "HQ to Branch"
-
-   [[firewall.rules]]
-   action = "allow"
-   src = "10.0.0.0/24"
-   dst = "10.0.0.0/24"
-   comment = "HQ intra-hub"
+   src = "*"
+   dst = "*"
+   comment = "Allow all hub traffic"
 
    [audit]
    file = "/var/log/quicether/audit.jsonl"
@@ -243,7 +233,9 @@ method = "password"
 
 [[hubs]]
 name = "branch"
-subnet = "10.1.0.0/24"
+
+[hubs.local_bridge]
+interface = "eth0"
 
 [mesh]
 enabled = true
@@ -330,7 +322,7 @@ Or equivalent `quicether server`/`quicether server stop` commands for non-system
    quicether status
    quicether session list   # server-side
    quicether hub list       # server-side
-   quicether routes
+   quicether mac-table
    ```
 
 2. HTTP health endpoint:
@@ -375,7 +367,7 @@ For single-user setups, update can be as simple as replacing binary and restarti
 ### 14.7.1 Key Metrics
 
 - `sessions_active`, `sessions_total`
-- `packets_sent`, `packets_recv`
+- `frames_sent`, `frames_recv`
 - `bytes_sent`, `bytes_recv`
 - Per-path RTT and loss
 - Per-hub client counts
@@ -402,10 +394,10 @@ For single-user setups, update can be as simple as replacing binary and restarti
 ### 14.8.1 "I Can't Reach Remote Host"
 
 Check list:
-1. `quicether status` – is client/server running, TUN up?
+1. `quicether status` – is client/server running, TAP up?
 2. `quicether session list` – is client session active? (server-side)
-3. `quicether routes` – is there a route for destination subnet?
-4. OS routing table – is traffic being sent to `quicether0`?
+3. `quicether mac-table` – is destination MAC learned?
+4. OS network – is TAP interface `quicether0` up and receiving DHCP?
 5. Firewall rules – is access allowed?
 6. Audit logs – any `firewall_deny` or error entries?
 

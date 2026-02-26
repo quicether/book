@@ -25,18 +25,19 @@ Before planning, let's acknowledge what httpf already proved works:
 | Session management | ✅ Proven | Direct port |
 | Three-tier auth (Ed25519/password/service token) | ✅ Proven | Direct port |
 | Firewall engine (Proxmox-style) | ✅ Proven | Direct port |
-| Policy engine (per-identity L3/L4) | ✅ Proven | Direct port |
-| Virtual NAT + anti-spoofing | ✅ Proven | Direct port |
+| Policy engine (per-identity L2/L3/L4) | ✅ Proven | Extend to L2 MAC rules |
+| Virtual Hub + anti-spoofing | ✅ Proven | Port as MAC-based switching |
 | Server mesh | ✅ Proven | Port to QUIC mesh protocol |
-| Cascade routing | ✅ Proven | Direct port |
-| Bridge mode | ✅ Proven | Direct port |
+| Cascade connections | ✅ Proven | Direct port |
+| Bridge mode | ✅ Proven | Extend to Local Bridge (physical LAN) |
 | Audit logging (JSONL + syslog) | ✅ Proven | Direct port |
 | Mobile FFI (iOS/Android) | ✅ Proven | Direct port |
-| PacketBatch format | ✅ Proven | Direct port |
+| FrameBatch format | ✅ Proven | Port as Ethernet frame batches |
 | Multipath | ⚠️ Parallel TCP | Native QUIC multipath (new) |
 | 0-RTT reconnection | ❌ Not possible over TCP | Native QUIC feature (new) |
 | Connection migration | ❌ Not possible over TCP | Native QUIC feature (new) |
-| TUN interface | ✅ Proven | Direct port |
+| TAP interface | ✅ L2 parsing proven | Port with full TAP mode |
+| Virtual TAP (L2↔L3 translation) | ✅ ARP/MAC primitives proven | New: userspace L2↔L3 for mobile |
 
 **Bottom line:** ~80% of QuicEther is a direct port from httpf. The new work is primarily the QUIC transport layer, native multipath, and connection migration.
 
@@ -66,14 +67,15 @@ Before planning, let's acknowledge what httpf already proved works:
 Core capabilities (all proven in httpf, ported to QUIC):
 - Single binary `quicether` (server/connect/bridge modes)
 - Linux (x86_64) + macOS
-- TUN interface + virtual NAT routing
+- TAP interface + Virtual Hub (MAC-based switching)
+- **Device Abstraction Layer: Native TAP + Virtual TAP** (L2↔L3 translation for platforms without TAP)
 - QUIC transport with TLS 1.3 (using `quinn`)
-- Hub-based multi-tenancy with CIDR IP pools
+- Hub-based multi-tenancy (Ethernet segments)
 - Session management
 - Three-tier authentication (Ed25519, password, service token)
 - Firewall engine (Proxmox-style ACL)
-- Policy engine (per-identity L3/L4)
-- PacketBatch encapsulation over QUIC streams
+- Policy engine (per-identity L2/L3/L4)
+- FrameBatch encapsulation over QUIC streams
 - Audit logging (JSONL + syslog)
 - CLI: server, connect, bridge, identity, hub, session, password, audit
 - Prometheus metrics endpoint
@@ -107,8 +109,8 @@ Primary personas:
 
 Additions:
 - Server mesh over QUIC (porting httpf's mesh to native QUIC)
-- Cascade routing across mesh peers
-- Cross-hub routing via mesh
+- Cascade connections across mesh peers
+- Cross-hub frame forwarding via mesh
 - Rate limiting (token bucket per identity)
 - Advanced firewall (ICMP types, port ranges)
 - Admin API (REST over local socket)
@@ -122,7 +124,7 @@ Primary personas:
 **Goal:** Stable, documented, battle-tested.
 
 Additions:
-- Windows support (TUN driver + service integration)
+- Windows support (TAP driver + service integration)
 - Mobile SDKs (iOS/Android via FFI — ported from httpf)
 - Hardened security (key rotation, revocation hooks)
 - Performance optimizations (profiling, hot-path tuning)
@@ -137,7 +139,7 @@ Primary personas:
 
 ### 12.4.1 Phase 1: QUIC Transport Core (v0.1-A)
 
-Deliverable: Two nodes can establish QUIC connection and tunnel IP packets.
+Deliverable: Two nodes can establish QUIC connection and tunnel Ethernet frames.
 
 Tasks:
 1. Port httpf's project structure to QUIC:
@@ -147,29 +149,32 @@ Tasks:
    - Server: `quicether server` listens on UDP port
    - Client: `quicether connect` connects to server
 3. TLS 1.3 with Ed25519 certificates
-4. PacketBatch over QUIC unidirectional streams
-5. TUN interface (port from httpf)
+4. FrameBatch over QUIC unidirectional streams
+5. TAP interface (port from httpf with L2 mode)
+6. Virtual TAP abstraction (TUN + L2↔L3 translation for mobile/restricted platforms)
 
 Testing:
 - Server + client on same LAN
-- `ping` across overlay addresses
+- DHCP through tunnel from physical router
+- Virtual TAP mode: verify Ethernet frame synthesis from IP packets
+- `ping` across overlay
 - `iperf3` throughput baseline
 
 ### 12.4.2 Phase 2: Hub & Session Management (v0.1-B)
 
-Deliverable: Multi-tenant server with IP allocation, auth, and sessions.
+Deliverable: Multi-tenant server with Virtual Hubs, auth, and sessions.
 
 Tasks (all direct ports from httpf):
-1. Hub manager with CIDR IP pools
+1. Hub manager with Virtual Hub (Ethernet segments)
 2. Session manager (create, track, destroy)
 3. Three-tier auth (Ed25519, password/Argon2id, service token)
-4. Virtual NAT router with anti-spoofing
+4. MAC learning table with anti-spoofing
 5. CLI: `hub`, `session`, `identity`, `password`
 
 Testing:
 - Multiple clients connecting to one server
-- Each gets unique virtual IP
-- Clients can communicate via server
+- Each joins hub, gets DHCP from physical router
+- Clients can communicate via Virtual Hub switching
 
 ### 12.4.3 Phase 3: Security & Audit (v0.1-C)
 
@@ -177,7 +182,7 @@ Deliverable: Complete security stack.
 
 Tasks (all direct ports from httpf):
 1. Firewall engine (Proxmox-style ACL, first-match)
-2. Policy engine (per-identity L3/L4 rules)
+2. Policy engine (per-identity L2/L3/L4 rules)
 3. Audit logger (JSONL file + optional syslog)
 4. Prometheus metrics endpoint
 5. 0-RTT reconnection support (QUIC session tickets)
@@ -192,7 +197,7 @@ Testing:
 Deliverable: Packaged v0.1 release with full httpf feature parity.
 
 Tasks:
-1. Bridge mode (client + local subnet forwarding)
+1. Local Bridge (client + physical LAN bridging to hub)
 2. CLI: `bridge`, `audit`, admin commands
 3. Docker image + systemd unit file
 4. Documentation: install guide, server setup, client setup
@@ -229,9 +234,9 @@ Deliverable: Multi-server mesh with cross-hub routing.
 
 Tasks (port httpf's mesh to QUIC):
 1. Mesh peer connections via QUIC
-2. Hub route advertisement protocol
-3. Cross-hub packet forwarding
-4. Cascade routing (multi-hop)
+2. Hub membership advertisement protocol
+3. Cross-hub frame forwarding
+4. Cascade connections (multi-hop)
 5. Service token authentication for mesh peers
 6. Rate limiting (token bucket)
 7. Admin API (REST over local socket)
@@ -239,15 +244,15 @@ Tasks (port httpf's mesh to QUIC):
 Testing:
 - 3-node server mesh
 - Client on server A reaches client on server B
-- Verify cascade routing with 3-hop path
+- Verify cascade connections with 3-hop path
 
 ---
 
 ### 12.4.7 Phase 7: Production Hardening (v1.0)
 
 Tasks:
-1. Windows support (TUN driver, named pipe IPC, Windows service)
-2. Mobile FFI (port httpf's iOS/Android bindings to QUIC)
+1. Windows support (TAP driver, named pipe IPC, Windows service)
+2. Mobile FFI (port httpf's iOS/Android bindings to QUIC, using Virtual TAP for L2↔L3 translation)
 3. Performance profiling and optimization
 4. Key rotation and revocation patterns
 5. Comprehensive documentation
@@ -261,7 +266,7 @@ To avoid scope creep:
 
 - **DHT / P2P discovery** → deferred to v2.0+ (server mesh is sufficient)
 - **Kernel bypass (DPDK/XDP)** → performance lab project after core stabilizes
-- **L2 bridging / TAP mode** → separate design after L3 is mature
+- **L3 routing / TUN mode** → optional future addition after L2 core is mature
 - **Web UI dashboard** → can be added once admin API is stable
 - **Post-quantum crypto activation** → ML-KEM-768 prepared but not enabled until ecosystem matures
 

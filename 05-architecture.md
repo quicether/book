@@ -22,24 +22,24 @@ This chapter translates the principles from Chapter 4 into a concrete system arc
 ### The 30-Second Explanation
 
 ```
-QuicEther = Single Binary + Server Mesh + QUIC Transport + TUN Interface
+QuicEther = Single Binary + Server Mesh + QUIC Transport + TAP Interface
 
 Server mode: quicether server --config server.toml
   ↓
 1. Load/generate Ed25519 identity
 2. Start QUIC listener (TLS 1.3)
-3. Initialize hubs (multi-tenant namespaces with IP pools)
-4. Accept client connections, assign IPs, create sessions
-5. Connect to mesh peers (other servers) via QUIC tunnels
-6. Route packets between clients, hubs, and mesh peers
+3. Initialize Virtual Hubs (virtual Ethernet switches with MAC tables)
+4. Accept client connections, assign MAC, create sessions
+5. Connect to mesh peers (other servers) via QUIC cascade tunnels
+6. Forward Ethernet frames between clients, hubs, and mesh peers
 
 Client mode: quicether connect --server vpn.example.com
   ↓
 1. Load/generate Ed25519 identity
-2. Create TUN interface (virtual network device)
+2. Create TAP interface (or Virtual TAP on mobile/restricted platforms)
 3. Authenticate to server (Ed25519 / password / service token)
-4. Receive session config (assigned IP, DNS, routes)
-5. Route IP packets through TUN → QUIC tunnel to server
+4. Receive session config (hub, MAC assignment, MTU)
+5. Bridge Ethernet frames through TAP → QUIC tunnel to server
 ```
 
 ### The 5-Minute Architecture Diagram
@@ -51,7 +51,7 @@ graph TD
         AUTH["Auth Engine"]
         HUB["Hub Manager"]
         SESSION["Session Manager"]
-        NAT["Virtual NAT Router"]
+        SWITCH["Virtual Hub (Ethernet Switch)"]
         FW["Firewall Engine"]
         POLICY["Policy Engine"]
         MESH["Mesh Manager"]
@@ -59,10 +59,10 @@ graph TD
     end
 
     subgraph Client["QuicEther Client"]
-        TUN["TUN Interface"]
+        TAP["Device Layer<br/>(Native TAP / Virtual TAP)"]
         TRANSPORT["QUIC Transport"]
         MP["Multipath Manager"]
-        ROUTER["Packet Router"]
+        BRIDGE["Frame Bridge"]
     end
 
     subgraph MeshPeer["Mesh Peer Server"]
@@ -73,13 +73,13 @@ graph TD
     LISTENER --> AUTH
     AUTH --> SESSION
     SESSION --> HUB
-    HUB --> NAT
-    NAT --> FW
+    HUB --> SWITCH
+    SWITCH --> FW
     FW --> POLICY
-    TUN <--> ROUTER
-    ROUTER <--> TRANSPORT
+    TAP <--> BRIDGE
+    BRIDGE <--> TRANSPORT
     MP --> TRANSPORT
-    MESH <-->|QUIC Tunnel| PEER_HUB
+    MESH <-->|QUIC Cascade| PEER_HUB
     AUTH --> AUDIT
     SESSION --> AUDIT
 
@@ -87,33 +87,33 @@ graph TD
     classDef client fill:#e8f5e9,stroke:#43a047;
     classDef peer fill:#fff3e0,stroke:#fb8c00;
 
-    class Server,LISTENER,AUTH,HUB,SESSION,NAT,FW,POLICY,MESH,AUDIT server;
-    class Client,TUN,TRANSPORT,MP,ROUTER client;
+    class Server,LISTENER,AUTH,HUB,SESSION,SWITCH,FW,POLICY,MESH,AUDIT server;
+    class Client,TAP,TRANSPORT,MP,BRIDGE client;
     class MeshPeer,PEER_HUB peer;
 ```
 
 ### Hub-Based Multi-Tenancy Diagram
 
-This diagram shows how hubs provide network namespace isolation — each hub has its own IP pool, clients, and policies (proven essential in httpf).
+This diagram shows how hubs provide virtual Ethernet segment isolation — each hub is a broadcast domain with its own MAC table, clients, and policies (proven essential in httpf).
 
 ```mermaid
 graph TD
     subgraph Server["QuicEther Server"]
         subgraph Hub1["Hub: office"]
-            POOL1["IP Pool: 10.100.0.0/24"]
-            C1["alice (10.100.0.2)"]
-            C2["bob (10.100.0.3)"]
+            MAC1["MAC Table"]
+            C1["alice (02:xx:xx:xx:01)"]
+            C2["bob (02:xx:xx:xx:02)"]
         end
         subgraph Hub2["Hub: dev"]
-            POOL2["IP Pool: 10.200.0.0/24"]
-            C3["charlie (10.200.0.2)"]
+            MAC2["MAC Table"]
+            C3["charlie (02:xx:xx:xx:03)"]
         end
-        VNAT["Virtual NAT Router"]
+        VSWITCH["Virtual Ethernet Switch"]
     end
 
-    C1 --> VNAT
-    C2 --> VNAT
-    C3 --> VNAT
+    C1 --> VSWITCH
+    C2 --> VSWITCH
+    C3 --> VSWITCH
 ```
 
 ---
@@ -122,37 +122,40 @@ graph TD
 
 ### Component 1: Server Core (Hub & Session Management)
 
-**Responsibility:** Accept clients, manage hubs, allocate IPs, enforce policies.
+**Responsibility:** Accept clients, manage hubs, forward Ethernet frames, enforce policies.
 
 **Sub-components:**
 
-#### 1.1 Hub Manager (Multi-Tenant Namespacing)
+#### 1.1 Hub Manager (Virtual Ethernet Switch)
 ```rust
 // Identity identifier (BLAKE3 hash of public key, truncated)
 type IdentityId = String;  // "qe_<blake3(pk)[..16]>"
 
 struct Hub {
     name: String,                          // "office", "dev", etc.
-    ip_pool: IpPool,                       // CIDR pool for IP allocation
+    mac_table: MacTable,                   // MAC address learning table
     allowed_identities: Option<Vec<IdentityId>>,  // None = open
-    dns_servers: Vec<IpAddr>,
     mtu: u16,                              // Default 1400
     firewall_rules: Vec<FirewallRule>,
     policy_rules: Vec<PolicyRule>,
-    nat_enabled: bool,
+    secure_nat: Option<SecureNatConfig>,   // Optional, off by default
     sessions: HashMap<IdentityId, Session>,
 }
 
-struct IpPool {
-    network: IpNet,                // e.g., 10.100.0.0/24
-    gateway: IpAddr,               // e.g., 10.100.0.1 (server)
-    allocated: HashMap<IpAddr, IdentityId>,
-    lease_duration: Duration,
+struct MacTable {
+    entries: HashMap<MacAddress, MacEntry>,
+    aging_time: Duration,           // Default 300s, like physical switches
+}
+
+struct MacEntry {
+    identity: IdentityId,           // Which client owns this MAC
+    last_seen: Instant,
 }
 
 impl Hub {
-    fn allocate_ip(&mut self, identity: &IdentityId) -> Result<IpAddr>;
-    fn release_ip(&mut self, ip: IpAddr);
+    fn learn_mac(&mut self, mac: MacAddress, identity: &IdentityId);
+    fn lookup_mac(&self, mac: &MacAddress) -> Option<&MacEntry>;
+    fn flush_aged(&mut self);       // Remove stale entries
     fn check_allowed(&self, identity: &IdentityId) -> bool;
 }
 ```
@@ -161,7 +164,7 @@ impl Hub {
 ```rust
 struct Session {
     identity_id: IdentityId,
-    assigned_ip: IpAddr,
+    mac_address: MacAddress,       // Client's TAP MAC
     hub_name: String,
     connected_at: Instant,
     last_activity: Instant,
@@ -176,10 +179,10 @@ struct SessionManager {
 }
 
 impl SessionManager {
-    async fn create_session(&mut self, identity: IdentityId, hub: &str) -> Result<Session>;
+    async fn create_session(&mut self, identity: IdentityId, hub: &str, mac: MacAddress) -> Result<Session>;
     async fn keepalive(&mut self, session_id: &SessionId);
     async fn expire_idle(&mut self);
-    fn get_session_by_ip(&self, ip: IpAddr) -> Option<&Session>;
+    fn get_session_by_mac(&self, mac: &MacAddress) -> Option<&Session>;
 }
 ```
 
@@ -200,58 +203,90 @@ struct MeshPeer {
 
 impl MeshManager {
     async fn connect_to_peers(&mut self);
-    async fn forward_packet(&self, dest_ip: IpAddr, packet: &[u8]) -> Result<()>;
+    async fn forward_frame(&self, dest_mac: &MacAddress, frame: &[u8]) -> Result<()>;
     async fn auto_reconnect(&mut self);  // Exponential backoff
 }
 ```
 
 **Mesh Flow:**
 ```
-Server A (hub: "office", 10.100.0.0/24)
-  ↕ QUIC tunnel (service token auth)
-Server B (hub: "dev", 10.200.0.0/24)
+Server A (hub: "office", virtual Ethernet segment)
+  ↕ QUIC cascade tunnel (service token auth)
+Server B (hub: "dev", virtual Ethernet segment)
 
-Client on Server A (10.100.0.2) sends packet to 10.200.0.3:
-1. Server A routing table: 10.200.0.0/24 → mesh peer B
-2. Forward packet through QUIC tunnel to Server B
-3. Server B delivers to client 10.200.0.3
+Client on Server A (MAC 02:aa:...) sends frame to 02:bb:... on Server B:
+1. Server A MAC table: 02:bb:... not found locally
+2. Flood frame to mesh peers (or use learned MAC-to-peer mapping)
+3. Server B receives frame, MAC table lookup finds 02:bb:...
+4. Server B delivers frame to client 02:bb:...
 ```
 
 ---
 
-### Component 2: Data Plane (Packet Forwarding)
+### Component 2: Data Plane (Ethernet Frame Forwarding)
 
-**Responsibility:** Move IP packets between TUN interface and QUIC tunnels.
+**Responsibility:** Move Ethernet frames between TAP interface and QUIC tunnels.
 
-#### 2.1 TUN Interface
+#### 2.1 Device Abstraction Layer (Native TAP / Virtual TAP)
+
+Not all platforms support TAP devices. iOS and Android only expose TUN (L3) interfaces, and some containers lack TAP. QuicEther abstracts this behind a **Device Abstraction Layer** with two modes:
+
 ```rust
-struct TunInterface {
+/// Both modes produce/consume Ethernet frames for the QUIC tunnel.
+enum DeviceMode {
+    /// Real TAP device — reads/writes raw Ethernet frames.
+    NativeTap(TapInterface),
+    /// TUN device + userspace L2↔L3 translation.
+    VirtualTap(VirtualTapInterface),
+}
+```
+
+**Native TAP** (Linux, macOS, Windows): Real TAP device. Kernel produces Ethernet frames with ARP, DHCP, broadcast — full L2 transparency.
+
+**Virtual TAP** (iOS, Android, containers): TUN device underneath. QuicEther synthesizes Ethernet headers on outbound IP packets and strips them on inbound frames. ARP is handled in userspace via an ARP proxy/cache. The server sees no difference — both modes produce Ethernet frames.
+
+```rust
+struct TapInterface {
     name: String,           // "quicether0"
     fd: RawFd,              // File descriptor
     mtu: usize,             // Typically 1420 (1500 - QUIC overhead)
-    local_addr: IpAddr,     // e.g., 100.64.0.1
-    routes: Vec<IpNet>,     // Subnets we route
+    mac_addr: MacAddress,   // Locally-administered MAC (02:xx:xx:xx:xx:xx)
 }
 
-impl TunInterface {
-    async fn read_packet(&mut self) -> Result<Vec<u8>>;
-    async fn write_packet(&mut self, packet: &[u8]) -> Result<()>;
+impl TapInterface {
+    async fn read_frame(&mut self) -> Result<Vec<u8>>;   // Read Ethernet frame
+    async fn write_frame(&mut self, frame: &[u8]) -> Result<()>;
+}
+
+struct VirtualTapInterface {
+    tun: TunInterface,              // OS-level TUN device (L3 only)
+    mac_address: MacAddress,        // Assigned MAC (02:xx:xx:xx:xx:xx)
+    arp_cache: HashMap<Ipv4Addr, MacAddress>,  // IP → MAC for header synthesis
+}
+
+impl VirtualTapInterface {
+    async fn read_frame(&mut self) -> Result<Vec<u8>>;   // TUN read + wrap in Ethernet
+    async fn write_frame(&mut self, frame: &[u8]) -> Result<()>; // Strip Ethernet + TUN write
 }
 ```
 
-**TUN Device Flow:**
+Auto-selection: Linux/macOS/Windows → Native TAP. iOS/Android → Virtual TAP. Override via `[network].device_mode` config.
+
+See Chapter 10 for the full Virtual TAP design (L2↔L3 translation, ARP proxy, and platform matrix).
+
+**Device Flow (Native TAP):**
 ```
 Application writes to socket
   ↓
-Kernel routing: "Dest is 100.64.x.x, send to quicether0"
+Kernel: ARP resolution → Ethernet frame via quicether0 TAP
   ↓
-TUN interface (quicether0)
+TAP interface (quicether0)
   ↓
-QuicEther reads packet from TUN fd
+QuicEther reads Ethernet frame from TAP fd
   ↓
-Look up destination in routing table
+Send via QUIC tunnel to server (Virtual Hub)
   ↓
-Send via QUIC tunnel to appropriate peer
+Server switches frame to destination client by MAC address
 ```
 
 #### 2.2 QUIC Transport
@@ -270,10 +305,10 @@ impl QuicTransport {
     // Server: accept incoming client
     async fn accept_client(&mut self) -> Result<Connection>;
     
-    // Send packet batch (proven batching format from httpf)
-    async fn send_batch(&mut self, conn: &Connection, packets: &[Vec<u8>]) -> Result<()>;
+    // Send frame batch (proven batching format from httpf)
+    async fn send_batch(&mut self, conn: &Connection, frames: &[Vec<u8>]) -> Result<()>;
     
-    // Receive packet batch
+    // Receive frame batch
     async fn recv_batch(&mut self, conn: &Connection) -> Result<Vec<Vec<u8>>>;
 }
 ```
@@ -285,47 +320,53 @@ impl QuicTransport {
 - **Stream multiplexing:** Control stream + data streams on same connection
 - **Integrated TLS 1.3:** No separate TLS handshake needed
 
-#### 2.3 Virtual NAT Router (Server-Side)
+#### 2.3 Virtual Hub — Ethernet Switch (Server-Side)
 ```rust
-struct VirtualNatRouter {
+struct VirtualHub {
     hubs: HashMap<String, Hub>,
     mesh_peers: Vec<MeshPeer>,
     firewall: FirewallEngine,
     policy: PolicyEngine,
 }
 
-impl VirtualNatRouter {
-    // Main packet forwarding loop (server-side)
-    async fn route_packet(&self, src_session: &Session, packet: &[u8]) -> Result<()> {
-        let dest_ip = extract_dest_ip(packet);
-        let src_ip = extract_src_ip(packet);
+impl VirtualHub {
+    // Main frame forwarding loop (server-side)
+    async fn switch_frame(&self, src_session: &Session, frame: &[u8]) -> Result<()> {
+        let src_mac = extract_src_mac(frame);
+        let dst_mac = extract_dst_mac(frame);
         
-        // 1. Verify source IP matches session (anti-spoofing)
-        if src_ip != src_session.assigned_ip {
-            audit_log("spoofed_source", src_session);
+        // 1. Verify source MAC matches session (anti-spoofing)
+        if src_mac != src_session.mac_address {
+            audit_log("spoofed_mac", src_session);
             return Err(Error::SpoofedSource);
         }
         
-        // 2. Check firewall rules
-        if !self.firewall.check(src_ip, dest_ip, packet) {
+        // 2. Learn source MAC (update MAC table)
+        self.learn_mac(src_mac, &src_session.identity_id);
+        
+        // 3. Check firewall rules (L2/L3/L4)
+        if !self.firewall.check_frame(frame) {
             return Ok(()); // Silently drop
         }
         
-        // 3. Check policy rules
-        if !self.policy.check(&src_session.identity_id, dest_ip, packet) {
+        // 4. Check policy rules
+        if !self.policy.check(&src_session.identity_id, frame) {
             return Ok(()); // Drop per policy
         }
         
-        // 4. Route to destination
-        if let Some(local_session) = self.find_session_by_ip(dest_ip) {
+        // 5. Switch frame by destination MAC
+        if dst_mac.is_broadcast() || dst_mac.is_multicast() {
+            // Broadcast/multicast: flood to all clients in hub + mesh peers
+            self.flood_frame(src_session, frame).await?;
+        } else if let Some(local_session) = self.find_session_by_mac(&dst_mac) {
             // Destination is a local client — forward directly
-            local_session.send_packet(packet).await?;
-        } else if let Some(mesh_peer) = self.find_mesh_peer_for_ip(dest_ip) {
-            // Destination is on a mesh peer — forward through tunnel
-            mesh_peer.forward(packet).await?;
+            local_session.send_frame(frame).await?;
+        } else if let Some(mesh_peer) = self.find_mesh_peer_for_mac(&dst_mac) {
+            // Destination learned on a mesh peer — forward through cascade
+            mesh_peer.forward(frame).await?;
         } else {
-            // No route — drop
-            return Err(Error::NoRoute);
+            // Unknown MAC — flood to all ports (standard switch behavior)
+            self.flood_frame(src_session, frame).await?;
         }
         
         Ok(())
@@ -333,39 +374,29 @@ impl VirtualNatRouter {
 }
 ```
 
-#### 2.4 Client Packet Router
+#### 2.4 Client Frame Bridge
 ```rust
-struct ClientRouter {
-    tun: TunInterface,
+struct ClientBridge {
+    tap: TapInterface,
     server_conn: QuicConnection,
-    routes: Vec<IpNet>,        // Routes pushed by server
-    split_tunnel: bool,        // If true, only VPN routes go through tunnel
 }
 
-impl ClientRouter {
+impl ClientBridge {
     async fn run(&mut self) {
         loop {
             tokio::select! {
-                // Packet from TUN (outbound)
-                Ok(packet) = self.tun.read_packet() => {
-                    let dest_ip = extract_dest_ip(&packet);
-                    if self.should_tunnel(dest_ip) {
-                        self.server_conn.send(&packet).await?;
-                    }
-                    // else: goes through normal OS routing
+                // Frame from TAP (outbound)
+                Ok(frame) = self.tap.read_frame() => {
+                    // All Ethernet frames go through tunnel to Virtual Hub
+                    self.server_conn.send(&frame).await?;
                 }
                 
-                // Packet from server (inbound)
-                Ok(packet) = self.server_conn.recv() => {
-                    self.tun.write_packet(&packet).await?;
+                // Frame from server (inbound)
+                Ok(frame) = self.server_conn.recv() => {
+                    self.tap.write_frame(&frame).await?;
                 }
             }
         }
-    }
-    
-    fn should_tunnel(&self, dest: IpAddr) -> bool {
-        if !self.split_tunnel { return true; }
-        self.routes.iter().any(|net| net.contains(&dest))
     }
 }
 ```
@@ -402,7 +433,7 @@ struct PathMetrics {
 #### 3.2 Packet Scheduling
 ```rust
 trait Scheduler {
-    fn select_path(&mut self, packet: &[u8]) -> PathId;
+    fn select_path(&mut self, frame: &[u8]) -> PathId;
 }
 
 // Round-robin (simplest)
@@ -411,7 +442,7 @@ struct RoundRobinScheduler {
 }
 
 impl Scheduler for RoundRobinScheduler {
-    fn select_path(&mut self, _packet: &[u8]) -> PathId {
+    fn select_path(&mut self, _frame: &[u8]) -> PathId {
         let path = self.current;
         self.current = (self.current + 1) % num_paths;
         path
@@ -428,7 +459,7 @@ struct LatencyAwareScheduler {
     rtt_threshold: Duration,  // Only use paths below this RTT
 }
 
-// Redundant (send on all paths for critical packets)
+// Redundant (send on all paths for critical frames)
 struct RedundantScheduler {
     // Used for latency-sensitive traffic
 }
@@ -511,6 +542,7 @@ impl AuthEngine {
 struct FirewallRule {
     action: FirewallAction,       // Accept, Drop, Reject
     direction: Direction,         // In, Out
+    source_mac: Option<MacAddress>,  // L2 filtering
     source: Option<IpNet>,
     dest: Option<IpNet>,
     protocol: Option<Protocol>,   // TCP, UDP, ICMP
@@ -526,12 +558,14 @@ struct FirewallEngine {
 }
 
 impl FirewallEngine {
-    fn check(&self, src: IpAddr, dst: IpAddr, packet: &[u8]) -> bool {
-        let proto = extract_protocol(packet);
-        let dport = extract_dest_port(packet);
+    fn check_frame(&self, frame: &[u8]) -> bool {
+        let src_mac = extract_src_mac(frame);
+        let (src_ip, dst_ip) = extract_ips_from_frame(frame);
+        let proto = extract_protocol_from_frame(frame);
+        let dport = extract_dest_port_from_frame(frame);
         
         for rule in &self.rules {
-            if rule.matches(src, dst, proto, dport) {
+            if rule.matches(src_mac, src_ip, dst_ip, proto, dport) {
                 return matches!(rule.action, FirewallAction::Accept);
             }
         }
@@ -576,15 +610,18 @@ struct PolicyEngine {
 }
 
 impl PolicyEngine {
-    fn check(&self, identity: &IdentityId, dest_ip: IpAddr, packet: &[u8]) -> bool {
+    fn check(&self, identity: &IdentityId, frame: &[u8]) -> bool {
+        let dest_ip = extract_dest_ip_from_frame(frame);
         for rule in &self.rules {
-            if rule.identity == *identity && rule.target.contains(&dest_ip) {
-                if rule.matches_port_proto(packet) {
-                    return matches!(rule.action, PolicyAction::Allow);
+            if rule.identity == *identity {
+                if let Some(ip) = dest_ip {
+                    if rule.target.contains(&ip) && rule.matches_port_proto_frame(frame) {
+                        return matches!(rule.action, PolicyAction::Allow);
+                    }
                 }
             }
         }
-        true  // Default allow (firewall handles L3 blocking)
+        true  // Default allow (firewall handles L2/L3 blocking)
     }
 }
 ```
@@ -634,14 +671,14 @@ impl AuditLogger {
 ```
 
 **Audit Events (all proven in httpf):**
-- `session_created` — client connected, IP assigned
+- `session_created` — client connected, MAC registered
 - `session_expired` — idle timeout or disconnect
 - `auth_failed` — invalid credentials
 - `rate_limited` — token bucket exhausted
 - `firewall_blocked` — packet dropped by ACL
 - `policy_denied` — packet denied by identity policy
 - `mesh_connected` — server mesh peer connected
-- `cascade_forwarded` — packet forwarded via cascade
+- `cascade_forwarded` — frame forwarded via cascade
 - `admin_action` — REST API admin operation
 
 ---
@@ -651,8 +688,8 @@ impl AuditLogger {
 #### 5.1 Metrics (Prometheus Format)
 ```rust
 struct Metrics {
-    packets_sent: Counter,
-    packets_recv: Counter,
+    frames_sent: Counter,
+    frames_recv: Counter,
     bytes_sent: Counter,
     bytes_recv: Counter,
     connections_active: Gauge,
@@ -671,9 +708,9 @@ async fn metrics_handler() -> impl Reply {
 
 **Example Metrics:**
 ```
-# HELP quicether_packets_sent Total packets sent
-# TYPE quicether_packets_sent counter
-quicether_packets_sent 1234567
+# HELP quicether_frames_sent Total Ethernet frames sent
+# TYPE quicether_frames_sent counter
+quicether_frames_sent 1234567
 
 # HELP quicether_path_rtt Path round-trip time in milliseconds
 # TYPE quicether_path_rtt gauge
@@ -719,8 +756,8 @@ quicether server --config /etc/quicether/server.toml
 # Client mode
 quicether connect --server vpn.example.com --hub office
 
-# Bridge mode (client + subnet advertisement)
-quicether bridge --server vpn.example.com --hub office --advertise 192.168.1.0/24
+# Bridge mode (client + LAN bridging into Virtual Hub)
+quicether bridge --server vpn.example.com --hub office --bridge-lan eth0
 
 # Identity management
 quicether identity generate
@@ -732,14 +769,14 @@ quicether identity show
 
 # Hub management (admin)
 quicether hub list --server vpn.example.com
-quicether hub create --name dev --cidr 10.200.0.0/24
+quicether hub create --name dev
 
 # Session management
 quicether session list --server vpn.example.com
 # Output:
-# Identity          | Hub    | IP          | Connected | Bytes
-# qe_a1b2c3d4e5f6   | office | 10.100.0.2  | 2h 15m    | 1.2 GB
-# qe_x9y8z7w6v5u4   | dev    | 10.200.0.3  | 45m       | 340 MB
+# Identity          | Hub    | MAC               | Connected | Bytes
+# qe_a1b2c3d4e5f6   | office | 02:aa:bb:cc:00:01 | 2h 15m    | 1.2 GB
+# qe_x9y8z7w6v5u4   | dev    | 02:aa:bb:cc:00:02 | 45m       | 340 MB
 
 # Admin operations
 quicether admin disconnect --identity qe_a1b2c3d4 --server vpn.example.com
@@ -750,37 +787,39 @@ quicether audit --server vpn.example.com --last 100
 
 ## Data Flow Examples
 
-### Example 1: Client-to-Client via Server (Common Case)
+### Example 1: Client-to-Client via Virtual Hub (Common Case)
 
 ```
-Scenario: Alice (10.100.0.2) pings Bob (10.100.0.3), both on hub "office"
+Scenario: Alice (MAC 02:aa:01) pings Bob (MAC 02:bb:02), both on hub "office"
 
 1. Alice's laptop:
-   ping 10.100.0.3
+   ping 10.100.0.3 (Bob's IP, learned via ARP)
    ↓
-   Kernel routes to quicether0 TUN
+   Kernel: ARP resolves Bob → MAC 02:bb:02
    ↓
-   QuicEther client reads ICMP packet from TUN
+   Ethernet frame sent to quicether0 TAP
+   ↓
+   QuicEther client reads Ethernet frame from TAP
    ↓
    Send via QUIC tunnel to server
 
-2. Server (Virtual NAT Router):
-   Receive packet from Alice's session
+2. Server (Virtual Hub / Ethernet Switch):
+   Receive frame from Alice's session
    ↓
-   Anti-spoof check: src=10.100.0.2, session IP=10.100.0.2 ✓
+   Anti-spoof check: src_mac=02:aa:01, session MAC=02:aa:01 ✓
+   ↓
+   Learn source MAC: 02:aa:01 → Alice's session
    ↓
    Firewall check: ICMP allowed ✓
    ↓
-   Policy check: Alice → 10.100.0.3 allowed ✓
+   MAC lookup: 02:bb:02 → Bob's session (same hub)
    ↓
-   Routing: 10.100.0.3 → Bob's session (same hub)
-   ↓
-   Forward packet to Bob via QUIC
+   Forward frame to Bob via QUIC
 
 3. Bob's laptop:
-   Receive packet from server
+   Receive frame from server
    ↓
-   Write to TUN (quicether0)
+   Write to TAP (quicether0)
    ↓
    Kernel delivers ICMP reply back through same path
    ↓
@@ -791,26 +830,26 @@ Scenario: Alice (10.100.0.2) pings Bob (10.100.0.3), both on hub "office"
 
 ```
 Scenario: Alice on Server A (hub "office") accesses Charlie on Server B (hub "dev")
-Servers A and B are mesh peers.
+Servers A and B are mesh peers with cascade connection.
 
 1. Alice's client:
-   ssh 10.200.0.2 (Charlie on Server B)
+   ssh charlie.dev.local
    ↓
-   QUIC tunnel → Server A
+   ARP + Ethernet frame via TAP → QUIC tunnel → Server A
 
 2. Server A:
-   Routing table: 10.200.0.0/24 → mesh peer Server B
+   MAC table: Charlie's MAC not found locally
    ↓
-   Forward packet through QUIC mesh tunnel → Server B
+   Flood frame to mesh peers via cascade tunnel → Server B
 
 3. Server B:
-   Receive from mesh tunnel
+   Receive from cascade tunnel
    ↓
-   Route to Charlie's session (10.200.0.2)
+   MAC table lookup: Charlie's MAC → Charlie's session
    ↓
-   Forward to Charlie via QUIC
+   Forward frame to Charlie via QUIC
 
-4. Reply follows reverse path: Charlie → Server B → mesh → Server A → Alice
+4. Reply follows reverse path: Charlie → Server B → cascade → Server A → Alice
 ```
 
 ### Example 3: Multi-Path Aggregation
@@ -825,10 +864,10 @@ Scenario: Priya downloads 10 GB file using 4 ISPs
    ↓
    Large download generates many TCP segments
    ↓
-   Kernel routes to quicether0
+   Kernel wraps in Ethernet frames → quicether0 TAP
 
 2. QuicEther multi-path:
-   Read packets from TUN
+   Read frames from TAP
    ↓
    PathManager has 4 paths:
      - eth0 (DSL, 25 Mbps, 10ms RTT)
@@ -837,12 +876,12 @@ Scenario: Priya downloads 10 GB file using 4 ISPs
      - sat0 (Starlink, 100 Mbps, 600ms RTT)
    ↓
    Scheduler: WeightedScheduler
-     - eth0: 11% of packets
-     - eth1: 22% of packets
-     - wwan0: 22% of packets
-     - sat0: 45% of packets
+     - eth0: 11% of frames
+     - eth1: 22% of frames
+     - wwan0: 22% of frames
+     - sat0: 45% of frames
    ↓
-   QUIC multipath sends packets on all 4 paths simultaneously
+   QUIC multipath sends frames on all 4 paths simultaneously
    ↓
    Aggregate bandwidth: ~225 Mbps (theoretical)
    ↓
@@ -869,15 +908,15 @@ Configuration:
   # listen = "0.0.0.0:9443"
   # [[hubs]]
   # name = "personal"
-  # cidr = "10.100.0.0/24"
   
   # Laptop
   quicether connect --server vpn.example.com --hub personal
 
 Behavior:
   - Client connects to server via QUIC
-  - Server assigns IP from hub pool
-  - All traffic tunneled through server (or split-tunnel)
+  - Server adds client to Virtual Hub (Ethernet segment)
+  - Client gets IP via DHCP from server's SecureNAT (or physical router)
+  - All Ethernet frames tunneled through server
   - Connection survives network changes (QUIC migration)
 ```
 
@@ -892,21 +931,21 @@ Topology:
 Configuration:
   # Home Server (behind NAT, port-forwarded or UPnP)
   quicether server --config server-home.toml
-  # hubs: [{ name = "homelab", cidr = "10.100.0.0/24" }]
+  # hubs: [{ name = "homelab" }]
   # mesh_peers: [{ address = "colo.example.com:9443", token = "..." }]
   
   # Colo Server (public IP)
   quicether server --config server-colo.toml
-  # hubs: [{ name = "colo", cidr = "10.200.0.0/24" }]
+  # hubs: [{ name = "colo" }]
   # mesh_peers: [{ address = "home.example.com:9443", token = "..." }]
   
   # Laptop
   quicether connect --server colo.example.com --hub colo
 
 Behavior:
-  - All servers form mesh via QUIC tunnels
+  - All servers form mesh via QUIC cascade tunnels
   - Client connects to colo, can reach home via mesh
-  - Automatic mesh routing between subnets
+  - Automatic frame forwarding between Ethernet segments
 ```
 
 ### Model 3: Small Business (James)
@@ -922,7 +961,6 @@ Configuration:
   # listen = "0.0.0.0:9443"
   # [[hubs]]
   # name = "office"
-  # cidr = "10.0.0.0/24"
   # allowed_identities = ["qe_alice...", "qe_bob...", "qe_charlie..."]
   
   # Remote Workers
@@ -932,7 +970,7 @@ Behavior:
   - Identity allowlist controls who can connect
   - Firewall rules control what clients can access
   - Audit logging for compliance
-  - Workers see office network as local
+  - Workers join office Ethernet segment — office feels local
 ```
 
 ### Model 4: Multi-ISP Aggregation (Priya)
@@ -953,11 +991,10 @@ Configuration:
   quicether server --config server.toml
   # [[hubs]]
   # name = "aggregate"
-  # cidr = "10.100.0.0/24"
 
 Behavior:
   - Client aggregates all 4 ISPs via QUIC multipath
-  - All traffic exits through cloud server
+  - All Ethernet frames exit through cloud server
   - Achieves ~200 Mbps aggregate vs 100 Mbps single path
 ```
 
@@ -974,7 +1011,6 @@ Configuration:
   quicether server --config server-hq.toml
   # [[hubs]]
   # name = "hq"
-  # cidr = "10.0.0.0/24"
   # [mesh]
   # peers = [
   #   { address = "factory.example.com:9443", token = "..." },
@@ -992,7 +1028,7 @@ Configuration:
   quicether connect --server hq.example.com --hub hq
 
 Behavior:
-  - All sites form mesh, cross-site routing automatic
+  - All sites form mesh, cross-site frame forwarding automatic
   - Policy engine controls per-identity access
   - All events logged for SOC 2 compliance
   - Rate limiting prevents abuse
@@ -1063,36 +1099,33 @@ PathMonitor detects:
 **Recovery:**
 ```
 1. Mark mesh peer as disconnected
-2. Packets to Server B's subnets: drop with ICMP unreachable
+2. Packets to Server B's hubs: drop (MAC entries expire)
 3. Auto-reconnect with exponential backoff (proven in httpf)
 4. When reconnected:
    - Re-authenticate with service token
-   - Exchange hub/subnet info
-   - Resume cross-site routing
+   - Exchange hub info
+   - Resume cross-site frame forwarding
 ```
 
 **User Impact:** Cross-site traffic interrupted, same-site traffic unaffected
 
-### Failure 4: Hub IP Pool Exhausted
+### Failure 4: MAC Table Full
 
-### Failure 4: Hub IP Pool Exhausted
-
-**Scenario:** Hub "office" has 10.100.0.0/24 (254 addresses) and all are allocated
+**Scenario:** Hub has too many MAC entries (learning table exhausted)
 
 **Detection:**
 ```
-- New client connects, hub.allocate_ip() returns Err(PoolExhausted)
+- MAC table entries exceed configured max (e.g., 10000)
 ```
 
 **Recovery:**
 ```
-1. Reject connection with clear error: "Hub 'office' IP pool exhausted"
-2. Admin action: expand pool or clean expired sessions
-3. Automatic: expire idle sessions (no keepalive in timeout period)
-4. Alternative: configure larger CIDR (e.g., /16)
+1. Flush aged entries (older than aging_time)
+2. If still full, reject new MAC learning (existing sessions continue)
+3. Admin action: increase max_mac_entries or clean idle sessions
 ```
 
-**User Impact:** New connections rejected, existing connections unaffected
+**User Impact:** New devices may not communicate until old entries age out
 
 ### Failure 5: Node Runs Out of Memory
 
@@ -1135,8 +1168,8 @@ PathMonitor detects:
 
 | Component | Overhead |
 |-----------|----------|
-| TUN read/write | ~0.5ms |
-| Routing table lookup | ~0.01ms |
+| TAP read/write | ~0.5ms |
+| MAC table lookup | ~0.01ms |
 | QUIC encryption (AES-GCM) | ~0.5ms |
 | QUIC framing | ~0.1ms |
 | Network (direct) | ~10-50ms (geography) |
@@ -1144,7 +1177,7 @@ PathMonitor detects:
 | **Total (direct)** | **~11-51ms** |
 | **Total (gateway)** | **~21-71ms** |
 
-**Target:** <5ms overhead (TUN + QUIC), rest is network physics
+**Target:** <5ms overhead (TAP + QUIC), rest is network physics
 
 ### Throughput
 
@@ -1193,8 +1226,8 @@ quicether connect --server vpn.example.com
 - Auto-generates Ed25519 identity (if none exists)
 - Connects to server via QUIC (TLS 1.3)
 - Authenticates with identity key
-- Receives IP assignment, creates TUN interface
-- Routes traffic through tunnel
+- Joins Virtual Hub, creates TAP interface
+- Bridges Ethernet frames through tunnel
 
 ### Minimal Server
 
@@ -1206,7 +1239,6 @@ listen = "0.0.0.0:9443"
 
 [[hubs]]
 name = "default"
-cidr = "10.100.0.0/24"
 ```
 
 ### Personal VPN Client
@@ -1217,7 +1249,6 @@ cidr = "10.100.0.0/24"
 [client]
 server = "vpn.example.com:9443"
 hub = "personal"
-split_tunnel = false    # Full tunnel
 
 [performance]
 profile = "balanced"
@@ -1251,7 +1282,6 @@ key_file = "/etc/quicether/server.key"
 
 [[hubs]]
 name = "office"
-cidr = "10.0.0.0/24"
 dns = ["10.0.0.1", "8.8.8.8"]
 mtu = 1400
 allowed_identities = ["qe_alice...", "qe_bob..."]
@@ -1298,13 +1328,13 @@ log_level = "info"
 **Key Architectural Decisions (validated by httpf):**
 
 1. **Single Binary:** Server/client/bridge/admin all in one executable
-2. **Hub-Based Multi-Tenancy:** Namespaced IP pools with firewall + policy per hub
+2. **Hub-Based Multi-Tenancy:** Virtual Ethernet switches with MAC tables, firewall + policy per hub
 3. **QUIC Transport:** TLS 1.3 + native multipath + 0-RTT + migration
-4. **TUN Interface:** Kernel integration for IP routing
-5. **Server Mesh:** Server-to-server QUIC tunnels for distributed topology
+4. **TAP Interface:** Kernel integration for Ethernet bridging
+5. **Server Mesh:** Server-to-server QUIC cascade tunnels for distributed topology
 6. **Three-Tier Auth:** Ed25519 identity + Argon2id password + service tokens
-7. **Virtual NAT Router:** Server-side IP allocation, anti-spoofing, forwarding
-8. **Firewall + Policy:** Proxmox-style ACL + per-identity L3/L4 rules
+7. **Virtual Hub (Ethernet Switch):** MAC learning, broadcast/flood, anti-spoofing
+8. **Firewall + Policy:** Proxmox-style ACL + per-identity L2/L3/L4 rules
 9. **Audit Logging:** JSONL + syslog for compliance
 10. **Observable:** Metrics (Prometheus) + Health checks
 
@@ -1312,9 +1342,9 @@ log_level = "info"
 
 | Component | Technology | Responsibility |
 |-----------|-----------|----------------|
-| Server Core | Hub + Session Manager | Client management, IP allocation |
-| Data Plane | QUIC + TUN | Packet forwarding |
-| Mesh | QUIC tunnels + routing | Server-to-server forwarding |
+| Server Core | Hub + Session Manager | Client management, MAC registration |
+| Data Plane | QUIC + TAP | Ethernet frame forwarding |
+| Mesh | QUIC cascade tunnels | Server-to-server frame forwarding |
 | Multi-Path | QUIC multipath | Aggregate bandwidth |
 | Security | TLS 1.3 + Firewall + Policy | Auth + ACL + access control |
 | Audit | JSONL + Syslog | Event logging |

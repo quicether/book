@@ -3,12 +3,12 @@
 ## Introduction
 
 By this point, QuicEther has a solid foundation ported from HTTP Fabric's validated design:
-- Hub-based multi-tenancy with CIDR IP allocation
-- Server mesh for geographic distribution and cascade routing
+- Hub-based multi-tenancy with Virtual Hubs (Ethernet segments)
+- Server mesh for geographic distribution and cascade connections
 - Three-tier authentication (Ed25519 identity, passwords, service tokens)
-- Proxmox-style firewall engine and policy system
+- Proxmox-style firewall engine and L2/L3/L4 policy system
 - Encrypted QUIC overlay with native multipath
-- TUN-based L3 VPN with virtual NAT and bridge mode
+- TAP-based L2 VPN with MAC-based switching and Local Bridge
 - A single `quicether` binary with `server`/`connect`/`bridge` commands
 - Comprehensive audit logging (JSONL + syslog)
 
@@ -97,7 +97,7 @@ As the QUIC ecosystem evolves, QuicEther can adopt extensions that provide real 
 
 ### 16.2.2 IPv6 Dual-Stack Enhancements
 
-httpf already supports dual-stack (`subnet_v6` in hub config). Future improvements:
+httpf already supports dual-stack. Future improvements:
 - IPv6-only overlay networks for modern deployments.
 - Happy Eyeballs-style path selection (prefer IPv6 when faster).
 - IPv6 flow labels for multipath hints.
@@ -105,7 +105,7 @@ httpf already supports dual-stack (`subnet_v6` in hub config). Future improvemen
 ### 16.2.3 Kernel Bypass & io_uring
 
 For high-throughput deployments:
-- **io_uring** for zero-copy packet processing on Linux.
+- **io_uring** for zero-copy frame processing on Linux.
 - **AF_XDP** for kernel bypass on dedicated networking hardware.
 - **DPDK** integration for carrier-grade throughput (requires dedicated NICs).
 
@@ -194,7 +194,7 @@ BLAKE3 is quantum-resistant (256-bit output). No migration needed for hashing. A
 
 ### 16.5.1 Higher-Level Policy Objects
 
-Beyond CIDR-based rules, future policy could support:
+Beyond MAC/IP-based rules, future policy could support:
 - **Named services** (e.g., "ssh", "git", "k8s-api") as policy objects.
 - **Identity groups** (e.g., "dev-team", "contractors") mapped from auth backends.
 - **Time-based conditions** (e.g., allow from 09:00-18:00 UTC).
@@ -206,7 +206,6 @@ Example future rule:
 name = "dev-ssh-hours"
 src_group = "dev-team"
 service = "ssh"
-dst_subnet = "10.0.0.0/16"
 action = "allow"
 time_window = "09:00-18:00Z"
 ```
@@ -263,11 +262,12 @@ Build on the existing admin API:
 
 ### 16.6.4 Mobile Enhancements
 
-httpf already has mobile FFI (iOS/Android). Future mobile-specific features:
+httpf already has mobile FFI (iOS/Android). Mobile platforms use the **Virtual TAP** abstraction (Chapter 10, Section 10.1.3) to participate in the L2 overlay despite only having TUN/L3 APIs. Future mobile-specific features:
 - **Always-on VPN** integration with OS VPN APIs.
 - **On-demand connect** rules (connect when accessing specific domains).
 - **Battery-aware multipath**: Prefer Wi-Fi over cellular to save battery.
 - **Split tunnel by app**: Route specific apps through VPN (Android per-app VPN API).
+- **Virtual TAP optimizations**: ARP cache pre-population from server-pushed MAC tables, reducing convergence time on mobile reconnect.
 
 ---
 
@@ -312,6 +312,7 @@ For very large deployments (10,000+ nodes):
 QuicEther may need to interoperate with existing infrastructure:
 - **WireGuard gateway**: Translate between QuicEther and WireGuard peers at edges.
 - **IPsec gateway**: Bridge to legacy VPN infrastructure.
+- **L3 routing mode**: Virtual TAP already solves L3-only platforms (iOS, Android) at the edge while keeping L2 in the overlay. A future pure L3 mode (TUN everywhere, no Ethernet framing) could be offered for environments that truly don't need L2 bridging.
 - **SD-WAN integration**: Act as an overlay endpoint in SD-WAN deployments.
 
 ### 16.8.3 Governance & Community
@@ -334,7 +335,7 @@ This chapter outlined **possible futures** for QuicEther beyond the initial http
 | **Multipath** | Failover + redundant | App-aware scheduling | Learning-based |
 | **Crypto** | X25519 + ChaCha20 | Hybrid ML-KEM-768 | PQ-only option |
 | **Policy** | Firewall + ACLs | Time-based + groups | External OPA/LDAP |
-| **Platform** | Linux/macOS/Windows | Mobile (iOS/Android) | Kubernetes CNI |
+| **Platform** | Linux/macOS/Windows (Native TAP) | Mobile via Virtual TAP (iOS/Android) | Kubernetes CNI |
 | **Scale** | Single server + mesh | Hub sharding | Mesh hierarchy |
 
 The key insight from building httpf: **start with what works, extend carefully**. Every feature in this chapter builds on the validated foundation rather than requiring architectural changes. The server-based model provides a reliable fallback, and optimizations like P2P connections are additive improvements.

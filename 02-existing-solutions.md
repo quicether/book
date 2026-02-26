@@ -131,9 +131,9 @@ Peer A <=============> Peer B
 - Still relies on vendor infrastructure by default
 - Vendor relays data for hard NAT cases
 - No multipath aggregation
-- L2 bridging overhead vs L3 routing
+- Custom protocol lacks QUIC's transport advantages (connection migration, 0-RTT)
 
-**Verdict:** Better than Tailscale for self-hosting, but still has vendor dependencies and lacks multipath.
+**Verdict:** Closest to QuicEther's Layer 2 model, but still has vendor dependencies, lacks multipath, and uses a custom UDP protocol instead of QUIC.
 
 ### Nebula (by Slack/Defined Networking)
 
@@ -253,9 +253,9 @@ Client -----> httpf Server (Hub) -----> Internet / Mesh Servers
 ```
 
 **What It Proved:**
-- ✅ Hub-based multi-tenancy with IP pools
+- ✅ Hub-based multi-tenancy with virtual Ethernet segments
 - ✅ Three-tier auth (Ed25519 + Argon2id passwords + service tokens)
-- ✅ Virtual NAT router with firewall & policy engine
+- ✅ Virtual switch with firewall & policy engine
 - ✅ Server mesh (server-to-server tunnels)
 - ✅ Cascade/multi-hop routing
 - ✅ Parallel TCP stream aggregation (SoftEther-style)
@@ -335,6 +335,7 @@ After analyzing all existing solutions, we find NO solution that provides:
 ✅ Direct node-to-node (when possible)
 ✅ Automatic discovery (no manual config)
 ✅ NAT traversal (works behind firewalls)
+✅ Layer 2 transparency (Ethernet bridging, ARP/DHCP pass-through)
 ✅ Indirect routing via user gateways (when direct fails)
 ✅ Multipath aggregation (use all ISPs)
 ✅ Fully self-hostable (no vendor dependency)
@@ -449,6 +450,7 @@ Rather than reinvent everything, QuicEther should leverage proven technologies:
 
 **QuicEther combines the best of:**
 - httpf's proven architecture (hubs, auth, firewall, mesh, cascade, FFI)
+- ZeroTier's Layer 2 model (virtual Ethernet, MAC learning, broadcast domains)
 - WireGuard's simplicity and security
 - Tailscale's auto-discovery and ease of use
 - SD-WAN's multipath capabilities

@@ -8,21 +8,21 @@ graph TD
     C["Server C (Hub: staging)"]
   end
 
-  A <-->|"QUIC Tunnel\n(service token auth)"| B
-  B <-->|"QUIC Tunnel\n(service token auth)"| C
-  A <-->|"QUIC Tunnel\n(service token auth)"| C
+  A <-->|"QUIC Cascade\n(service token auth)"| B
+  B <-->|"QUIC Cascade\n(service token auth)"| C
+  A <-->|"QUIC Cascade\n(service token auth)"| C
 
-  C1["Client: alice\n(10.100.0.2)"] --> A
-  C2["Client: bob\n(10.100.0.3)"] --> A
-  C3["Client: charlie\n(10.200.0.2)"] --> B
-  C4["Client: dave\n(10.50.0.2)"] --> C
+  C1["Client: alice\n(MAC 02:aa:01)"] --> A
+  C2["Client: bob\n(MAC 02:aa:02)"] --> A
+  C3["Client: charlie\n(MAC 02:bb:01)"] --> B
+  C4["Client: dave\n(MAC 02:cc:01)"] --> C
 
-  C1 -.->|"packet to 10.200.0.2\nvia mesh tunnel"| C3
+  C1 -.->|"frame to 02:bb:01\nvia cascade tunnel"| C3
 ```
 
 ## Introduction
 
-This chapter describes QuicEther's **server mesh** — the mechanism by which multiple QuicEther servers discover each other, exchange routing information, and forward packets between their respective client pools.
+This chapter describes QuicEther's **server mesh** — the mechanism by which multiple QuicEther servers discover each other, exchange hub membership, and forward Ethernet frames between their respective client pools via cascade connections.
 
 The server mesh replaces the Kademlia DHT that was originally envisioned in v1.0 of this book. After building HTTP Fabric (httpf), we learned that:
 
@@ -42,25 +42,25 @@ DHT-based P2P discovery remains a future extension (see Chapter 16).
 A QuicEther server mesh is a set of servers connected by persistent QUIC tunnels:
 
 ```
-Server A (office hub: 10.100.0.0/24)
-    ↕ QUIC tunnel (service token auth, auto-reconnect)
-Server B (dev hub: 10.200.0.0/24)
-    ↕ QUIC tunnel (service token auth, auto-reconnect)
-Server C (staging hub: 10.50.0.0/24)
+Server A (office hub — virtual Ethernet segment)
+    ↕ QUIC cascade tunnel (service token auth, auto-reconnect)
+Server B (dev hub — virtual Ethernet segment)
+    ↕ QUIC cascade tunnel (service token auth, auto-reconnect)
+Server C (staging hub — virtual Ethernet segment)
 ```
 
 Each server:
-- Manages its own hubs, clients, and sessions
-- Connects to configured mesh peers
-- Forwards packets destined for peer subnets through mesh tunnels
+- Manages its own hubs (Virtual Ethernet switches), clients, and sessions
+- Connects to configured mesh peers via cascade tunnels
+- Forwards Ethernet frames destined for peer hubs through cascade tunnels
 - Automatically reconnects to peers on failure
 
 ### Mesh vs. Hub
 
 | Concept | Scope | Purpose |
 |---------|-------|---------|
-| **Hub** | Single server | Namespace for clients (IP pool, firewall, policy) |
-| **Mesh** | Multiple servers | Inter-server routing and packet forwarding |
+| **Hub** | Single server | Virtual Ethernet switch (MAC table, firewall, policy) |
+| **Mesh** | Multiple servers | Inter-server frame forwarding via cascade connections |
 
 A server can have multiple hubs. The mesh connects servers so that clients in one server's hub can reach clients in another server's hub.
 
@@ -89,7 +89,6 @@ token = "mesh-secret-token-def456"
 # Local hubs
 [[hubs]]
 name = "office"
-cidr = "10.100.0.0/24"
 ```
 
 ### Configuration Fields
@@ -115,7 +114,7 @@ Server A → Server B:
      token: "mesh-secret-token-xyz789",
      server_id: "qe_server_a_id",
      hubs: [
-       { name: "office", cidr: "10.100.0.0/24" },
+       { name: "office" },
      ]
    }
 3. Server B validates token against its service_token
@@ -124,13 +123,13 @@ Server A → Server B:
      type: "mesh_accept",
      server_id: "qe_server_b_id",
      hubs: [
-       { name: "dev", cidr: "10.200.0.0/24" },
+       { name: "dev" },
      ]
    }
-5. Both servers update routing tables:
-   - Server A: 10.200.0.0/24 → mesh_peer_b
-   - Server B: 10.100.0.0/24 → mesh_peer_a
-6. Mesh tunnel is ACTIVE
+5. Both servers update their hub-to-peer mappings:
+   - Server A: hub "dev" → mesh_peer_b
+   - Server B: hub "office" → mesh_peer_a
+6. Cascade tunnel is ACTIVE
 ```
 
 ### Wire Format (QUIC Streams)
@@ -140,7 +139,7 @@ Mesh connections use multiplexed QUIC streams:
 | Stream | Purpose | Direction |
 |--------|---------|-----------|
 | Control stream (bi-directional) | Mesh handshake, keepalive, hub updates | Both |
-| Data streams (uni-directional) | Packet forwarding | Both |
+| Data streams (uni-directional) | Frame forwarding | Both |
 
 #### Control Stream Messages
 
@@ -169,74 +168,65 @@ enum MeshControlMessage {
 
 struct HubInfo {
     name: String,
-    cidr: IpNet,
     client_count: u32,
 }
 ```
 
 #### Data Stream Packet Format
 
-Packets forwarded through mesh tunnels use the same PacketBatch format as client data:
+Ethernet frames forwarded through cascade tunnels use the same FrameBatch format as client data:
 
 ```
-PacketBatch (mesh forwarding):
+FrameBatch (cascade forwarding):
 ┌──────────────────┐
-│ num_packets: u16  │
+│ num_frames: u16   │
 ├──────────────────┤
-│ packet_1_size: u16│
-│ packet_1_data     │  ← Raw IP packet
+│ frame_1_size: u16 │
+│ frame_1_data      │  ← Raw Ethernet frame
 ├──────────────────┤
-│ packet_2_size: u16│
-│ packet_2_data     │
+│ frame_2_size: u16 │
+│ frame_2_data      │
 ├──────────────────┤
 │ ...               │
 └──────────────────┘
 ```
 
-Packets are optionally compressed with LZ4 and encrypted with ChaCha20-Poly1305 (on top of QUIC's TLS encryption).
+Frames are optionally compressed with LZ4 and encrypted with ChaCha20-Poly1305 (on top of QUIC's TLS encryption).
 
 ---
 
-## 7.4 Mesh Routing
+## 7.4 Frame Forwarding
 
-### Route Table Construction
+### MAC-to-Peer Table Construction
 
-Each server builds its routing table from two sources:
+Each server builds its forwarding table from two sources:
 
-1. **Local hubs**: Subnets served by this server's own hubs
-2. **Mesh peers**: Subnets advertised by connected mesh peers
+1. **Local hubs**: MACs learned from this server's own clients
+2. **Mesh peers**: MACs learned from frames arriving via cascade tunnels
 
 ```rust
-struct MeshRoutingTable {
-    local_subnets: HashMap<IpNet, String>,
-    mesh_subnets: HashMap<IpNet, MeshPeerId>,
+struct MeshForwardingTable {
+    local_hubs: HashMap<String, Hub>,        // Hub name → local hub
+    peer_hubs: HashMap<String, MeshPeerId>,  // Hub name → mesh peer
+    mac_to_peer: HashMap<MacAddress, MeshPeerId>,  // Learned MACs from mesh
 }
 
-impl MeshRoutingTable {
-    fn route(&self, dest_ip: IpAddr) -> RouteDecision {
-        // 1. Check local hubs
-        for (subnet, hub_name) in &self.local_subnets {
-            if subnet.contains(&dest_ip) {
-                return RouteDecision::Local(hub_name.clone());
+impl MeshForwardingTable {
+    fn forward(&self, hub_name: &str, dst_mac: &MacAddress) -> RouteDecision {
+        // 1. Check local hub's MAC table
+        if let Some(hub) = self.local_hubs.get(hub_name) {
+            if hub.mac_table.lookup(dst_mac).is_some() {
+                return RouteDecision::Local(hub_name.to_string());
             }
         }
 
-        // 2. Check mesh peers (longest prefix match)
-        let mut best_match: Option<(u8, MeshPeerId)> = None;
-        for (subnet, peer_id) in &self.mesh_subnets {
-            if subnet.contains(&dest_ip) {
-                let prefix_len = subnet.prefix_len();
-                if best_match.map_or(true, |(best, _)| prefix_len > best) {
-                    best_match = Some((prefix_len, peer_id.clone()));
-                }
-            }
+        // 2. Check learned MAC-to-peer mappings
+        if let Some(peer_id) = self.mac_to_peer.get(dst_mac) {
+            return RouteDecision::CascadeForward(peer_id.clone());
         }
 
-        if let Some((_, peer_id)) = best_match {
-            return RouteDecision::MeshForward(peer_id);
-        }
-
-        RouteDecision::Drop
+        // 3. Unknown MAC in mesh — flood to all mesh peers
+        RouteDecision::Flood
     }
 }
 ```
@@ -274,9 +264,9 @@ TTL limit: max 4 hops (configurable) to prevent routing loops
 
 ---
 
-## 7.5 Cascade Routing
+## 7.5 Cascade Connections
 
-Cascade routing (proven in httpf) is a specialized form of multi-hop where servers form explicit chains for geographic or privacy routing:
+Cascade connections (proven in httpf) are a specialized form of multi-hop where servers form explicit chains for geographic or privacy bridging:
 
 ```
 Client → Server A (US) → Server B (EU) → Server C (Asia) → Destination
@@ -286,10 +276,10 @@ Client → Server A (US) → Server B (EU) → Server C (Asia) → Destination
 
 | Feature | Mesh | Cascade |
 |---------|------|---------|
-| Purpose | Connect server sites | Geographic/privacy routing |
+| Purpose | Connect server sites | Geographic/privacy bridging |
 | Topology | Any (star, ring, full) | Linear chain |
 | Auth | Service tokens | Service tokens |
-| Use case | Multi-site enterprise | Privacy, geo-routing |
+| Use case | Multi-site enterprise | Privacy, geo-bridging |
 
 ### Cascade Configuration
 
@@ -333,16 +323,16 @@ Service tokens are:
 
 ### Anti-Spoofing
 
-Mesh tunnels enforce packet source validation:
+Cascade tunnels enforce frame source validation:
 
 ```
-Server A receives packet from Client X (session IP: 10.100.0.2):
-1. Verify source IP matches session: src=10.100.0.2 ✓
+Server A receives frame from Client X (session MAC: 02:aa:01):
+1. Verify source MAC matches session: src_mac=02:aa:01 ✓
 2. Forward to mesh (if destination is on another server)
 
-Server B receives mesh packet from Server A:
+Server B receives cascade frame from Server A:
 1. Trust Server A's anti-spoofing (mesh peers are trusted after auth)
-2. Route to local client
+2. Switch to local client by MAC
 ```
 
 ### Rate Limiting
@@ -351,7 +341,7 @@ Mesh tunnels have configurable rate limits:
 
 ```toml
 [mesh]
-max_packets_per_second = 100000
+max_frames_per_second = 100000
 burst = 500000
 ```
 
@@ -375,12 +365,12 @@ Auto-reconnect with exponential backoff:
   ↓
 On reconnect:
   Re-authenticate with service token
-  Exchange hub/subnet info (may have changed)
+  Exchange hub membership info (may have changed)
   Resume forwarding
   ↓
 If peer unreachable for extended period:
-  Remove peer routes from table
-  Packets to peer subnets → drop with ICMP unreachable
+  Remove peer MAC entries from forwarding table
+  Frames to unknown MACs → flood to remaining peers only
   Continue retry loop indefinitely
 ```
 
@@ -413,9 +403,9 @@ quicether_mesh_peers_total 3
 # TYPE quicether_mesh_peers_connected gauge
 quicether_mesh_peers_connected 2
 
-# HELP quicether_mesh_packets_forwarded Packets forwarded through mesh
-# TYPE quicether_mesh_packets_forwarded counter
-quicether_mesh_packets_forwarded{peer="server-b"} 1234567
+# HELP quicether_mesh_frames_forwarded Frames forwarded through mesh
+# TYPE quicether_mesh_frames_forwarded counter
+quicether_mesh_frames_forwarded{peer="server-b"} 1234567
 ```
 
 ### CLI Commands
@@ -449,16 +439,16 @@ This is documented further in Chapter 16 (Future Directions).
 In this chapter we:
 
 - Defined the server mesh architecture (replacing the original DHT design)
-- Specified mesh connection protocol (QUIC tunnels + service token auth)
-- Designed route table construction and propagation
-- Described cascade routing for geographic/privacy chains
+- Specified mesh connection protocol (QUIC cascade tunnels + service token auth)
+- Designed MAC forwarding table construction and hub membership propagation
+- Described cascade connections for geographic/privacy chains
 - Addressed security, failure handling, and monitoring
 - Noted DHT as a future extension
 
 The server mesh is the **connectivity backbone** enabling:
 - Multi-site deployments (enterprise, homelab)
-- Cross-subnet routing between servers
-- Cascade routing for privacy/geo chains
+- Cross-hub Ethernet frame forwarding between servers
+- Cascade connections for privacy/geo chains
 - Automatic failover and reconnection
 
 All of these patterns were validated in HTTP Fabric (httpf) and are being ported to native QUIC.

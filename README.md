@@ -1,14 +1,14 @@
-# QuicEther Design Book (v2.0 — Post-httpf Revision)
+# QuicEther Design Book (v3.0 — L2/TAP Architecture)
 
 ## What This Is
 
-This is the **design and architecture document** for QuicEther — a Layer 3 VPN built on native QUIC transport.
+This is the **design and architecture document** for QuicEther — a Layer 2 VPN built on native QUIC transport, inspired by SoftEther's Virtual Hub architecture.
 
-> **Post-httpf Revision (Feb 2026):** This book has been comprehensively revised
-> to reflect lessons learned from building HTTP Fabric (httpf), a working L3 VPN
-> that tunnels IP packets over HTTP/WebSocket. QuicEther ports httpf's validated
-> architecture to native QUIC (RFC 9000), replacing HTTP/WebSocket with QUIC
-> streams for better performance, native multipath, and connection migration.
+> **L2 Architecture Revision (Feb 2026):** This book has been revised to reflect
+> QuicEther's Layer 2 (TAP/Ethernet) architecture. QuicEther transports Ethernet
+> frames over QUIC, using Virtual Hubs (Ethernet switches) for MAC-based switching.
+> Physical routers handle DHCP, ARP, and DNS — the VPN is a transparent L2 bridge.
+> Built on lessons from HTTP Fabric (httpf).
 
 It answers:
 - **Why** are we building this? (And what httpf proved)
@@ -60,7 +60,7 @@ For implementers who need to understand the details:
 7. **[Server Mesh & Discovery](./07-server-mesh-and-discovery.md)**
 8. **[QUIC Transport & Multipath](./08-quic-and-multipath.md)**
 9. **[Security Model & Zero-Trust](./09-security-and-zero-trust.md)**
-10. **[VPN Interface & Routing](./10-vpn-interface-and-routing.md)**
+10. **[Virtual Hub, TAP & Bridging](./10-vpn-interface-and-routing.md)**
 11. **[Daemon & CLI Architecture](./11-daemon-and-cli.md)**
 
 ### Phase 4: Implementation Strategy (Chapters 12-15)
@@ -88,7 +88,7 @@ Longer-term thinking and extensions:
 ✅ **Chapter 7:** Server Mesh & Discovery (Complete)  
 ✅ **Chapter 8:** QUIC Transport & Multipath (Complete)  
 ✅ **Chapter 9:** Security Model & Zero-Trust (Complete)  
-✅ **Chapter 10:** VPN Interface & Routing (Complete)  
+✅ **Chapter 10:** Virtual Hub, TAP & Bridging (Complete)  
 ✅ **Chapter 11:** Daemon & CLI Architecture (Complete)  
 ✅ **Chapter 12:** Implementation Roadmap (Complete)  
 ✅ **Chapter 13:** Testing & Validation Strategy (Complete)  
@@ -98,7 +98,7 @@ Longer-term thinking and extensions:
 
 � **[Architecture Diagrams](./diagrams/architecture.md)** — Mermaid diagrams of system architecture
 
-*All chapters revised to reflect httpf validation (Feb 2026).*
+*All chapters revised for L2/TAP architecture (Feb 2026).*
 
 ## How to Use This Book
 

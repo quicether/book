@@ -1,29 +1,31 @@
-# Chapter 10: VPN Interface & Routing
+# Chapter 10: Virtual Hub, TAP & Bridging
 
 ## Introduction
 
-This chapter explains how QuicEther integrates with the host networking stack:
-- How the virtual VPN interface works (TUN device)
-- How packets enter and leave the overlay
-- How routing decisions are made (local vs server vs bridge vs mesh)
-- How subnet advertisement and forwarding interact
+This chapter explains how QuicEther integrates with the host networking stack at Layer 2:
+- How the TAP device works (virtual Ethernet interface)
+- How Ethernet frames enter and leave the overlay
+- How the Virtual Hub performs MAC-based switching
+- How Local Bridge connects physical LANs to the overlay
 
-We stay at the L3 (IP) layer; L2 bridging is out of scope for v0.1.
+This is the core of the "virtual Ethernet switch over QUIC" model.
 
 ---
 
-## 10.1 The Virtual Interface (TUN)
+## 10.1 The Virtual Interface (TAP)
 
-### 10.1.1 Why TUN (Not TAP)
+### 10.1.1 Why TAP (Not TUN)
 
 As decided in Chapter 6:
-- We operate at **L3**, not L2
-- We route IP packets, not Ethernet frames
+- We operate at **L2**, not L3
+- We switch Ethernet frames, not route IP packets
+- Physical routers handle DHCP, ARP, DNS — no server-side IP management
 
-TUN characteristics:
-- Presents a virtual IP interface (`quicether0`)
-- Kernel routes IP packets to/from this interface
-- Userspace (QuicEther) reads/writes raw IP packets via a file descriptor
+TAP characteristics:
+- Presents a virtual Ethernet interface (`quicether0`)
+- Kernel treats it like a physical NIC
+- Userspace (QuicEther) reads/writes raw Ethernet frames via a file descriptor
+- Full L2 transparency: ARP, DHCP, broadcast all pass through natively
 
 ### 10.1.2 Interface Creation
 
@@ -31,110 +33,287 @@ On Linux, QuicEther roughly performs:
 
 ```bash
 # Conceptual equivalent
-ip tuntap add dev quicether0 mode tun
-ip addr add 100.64.0.1/16 dev quicether0
+ip tuntap add dev quicether0 mode tap
 ip link set quicether0 up
+# No IP address assigned by QuicEther — physical router provides via DHCP
 ```
 
-On macOS and Windows, OS-specific APIs create an equivalent TUN.
+On macOS, `feth` (fake Ethernet) or third-party TAP drivers create an equivalent virtual Ethernet adapter. On Windows, WinTap or similar virtual Ethernet adapters are used.
 
-### 10.1.3 Addressing (Hub-Based IP Allocation)
+### 10.1.3 The Platform Problem: Virtual TAP
 
-QuicEther uses **hub-based** IP allocation, proven in httpf:
-- Each hub defines a CIDR pool (e.g., `10.100.0.0/24`)
-- Server assigns virtual IPs from the pool when clients connect
-- Anti-spoofing ensures clients only use their assigned IP
+**The challenge:** TAP devices provide raw Ethernet frame access, but TAP is not available on every platform. iOS and Android only expose TUN (L3/IP) interfaces via their VPN APIs (`NEPacketTunnelProvider` on iOS, `VpnService` on Android). Containers and some restricted environments similarly lack TAP support.
 
-Default ranges:
-- Hub networks: private RFC1918 ranges (10.x.y.z/24, 172.16.x.y/24)
-- CGNAT range `100.64.0.0/10` available for overlay point-to-point addressing
-- For site-to-site bridge mode: advertise internal subnets through the hub
+This creates a fundamental tension: QuicEther's overlay protocol is L2 (Ethernet frames), but some clients can only produce and consume L3 (IP packets).
+
+**The solution: Virtual TAP** — a userspace abstraction layer that translates between L2 and L3 at the client edge, allowing platforms without native TAP to participate fully in the L2 overlay.
+
+#### Device Abstraction Layer
+
+QuicEther defines a **Device Abstraction Layer** with two modes:
+
+| Mode | Underlying Device | Platforms | How It Works |
+|------|------------------|-----------|-------------|
+| **Native TAP** | Real TAP device | Linux, macOS (feth), Windows (WinTap) | Read/write raw Ethernet frames directly |
+| **Virtual TAP** | TUN device + userspace L2↔L3 translation | iOS, Android, containers, restricted environments | Wrap IP packets in Ethernet headers (outbound), strip headers (inbound) |
+
+The overlay protocol is **always L2** — the server always sees Ethernet frames. The translation happens at the client edge only.
+
+```rust
+/// Device abstraction — both modes produce/consume Ethernet frames
+/// for the QUIC tunnel, regardless of the underlying OS interface.
+enum DeviceMode {
+    /// Real TAP device. Reads/writes raw Ethernet frames.
+    NativeTap(TapInterface),
+    /// TUN device with userspace L2↔L3 translation.
+    VirtualTap(VirtualTapInterface),
+}
+
+impl DeviceMode {
+    /// Read an Ethernet frame (from TAP directly, or synthesized from TUN).
+    async fn read_frame(&mut self) -> Result<Vec<u8>>;
+    /// Write an Ethernet frame (to TAP directly, or stripped to IP for TUN).
+    async fn write_frame(&mut self, frame: &[u8]) -> Result<()>;
+}
+```
+
+#### Virtual TAP: L2↔L3 Translation
+
+The Virtual TAP performs bidirectional translation so the overlay sees Ethernet frames while the OS sees IP packets:
+
+**Outbound (L3→L2): App sends IP packet → Virtual TAP wraps it in an Ethernet frame**
+
+```text
+Application sends IP packet
+  ↓
+TUN interface: QuicEther reads raw IP packet
+  ↓
+Virtual TAP: lookup destination IP → ARP cache → destination MAC
+  ↓
+Virtual TAP: prepend 14-byte Ethernet header
+  (dst MAC from ARP cache, src MAC = node's assigned MAC, ethertype = 0x0800)
+  ↓
+Result: complete Ethernet frame → send via QUIC tunnel to server
+```
+
+**Inbound (L2→L3): Server sends Ethernet frame → Virtual TAP strips it to IP packet**
+
+```text
+QUIC tunnel delivers Ethernet frame from server
+  ↓
+Virtual TAP: parse Ethernet header (14 bytes)
+  ↓
+Virtual TAP: learn source MAC → source IP mapping from frame
+  ↓
+Virtual TAP: strip Ethernet header → raw IP packet
+  ↓
+TUN interface: write IP packet to OS network stack
+```
+
+**ARP Proxy: Virtual TAP handles ARP locally**
+
+Since there is no real Ethernet interface, ARP requests from the overlay cannot reach the OS network stack. The Virtual TAP intercepts and responds to ARP:
+
+```text
+Overlay sends ARP request: "Who has 10.0.0.5?"
+  ↓
+Virtual TAP: check ARP cache for 10.0.0.5
+  ↓
+If known: build ARP reply (10.0.0.5 is at <cached MAC>) → send back to overlay
+If unknown: generate ARP reply with node's own MAC → learn the mapping
+```
+
+The Virtual TAP also **learns MAC-to-IP mappings** by observing:
+- ARP requests and replies flowing through the overlay
+- Source MAC + source IP from Ethernet frame payloads
+
+```rust
+struct VirtualTapInterface {
+    tun: TunInterface,              // OS-level TUN device (L3)
+    mac_address: MacAddress,        // Assigned MAC for this node (02:xx:xx:xx:xx:xx)
+    arp_cache: HashMap<Ipv4Addr, MacAddress>,   // IP → MAC mappings
+    mac_to_ip: HashMap<MacAddress, Ipv4Addr>,   // Reverse: MAC → IP
+    gateway_mac: MacAddress,        // Virtual gateway MAC (for default route)
+}
+
+impl VirtualTapInterface {
+    /// Outbound: read IP packet from TUN, wrap in Ethernet frame.
+    async fn read_frame(&mut self) -> Result<Vec<u8>> {
+        let ip_packet = self.tun.read_packet().await?;
+        let dst_ip = extract_dst_ip(&ip_packet)?;
+        let dst_mac = self.arp_cache.get(&dst_ip)
+            .unwrap_or(&self.gateway_mac);
+        
+        let mut frame = Vec::with_capacity(ETH_HEADER_SIZE + ip_packet.len());
+        frame.extend_from_slice(&dst_mac.0);        // 6 bytes dst MAC
+        frame.extend_from_slice(&self.mac_address.0); // 6 bytes src MAC
+        frame.extend_from_slice(&ETHERTYPE_IPV4);    // 2 bytes ethertype
+        frame.extend_from_slice(&ip_packet);         // IP payload
+        Ok(frame)
+    }
+    
+    /// Inbound: receive Ethernet frame, strip header, write IP to TUN.
+    async fn write_frame(&mut self, frame: &[u8]) -> Result<()> {
+        if frame.len() < ETH_HEADER_SIZE {
+            return Ok(()); // Runt frame
+        }
+        
+        let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        
+        match ethertype {
+            ETHERTYPE_ARP => {
+                // Handle ARP locally — learn mappings, send replies
+                self.handle_arp(&frame[ETH_HEADER_SIZE..]).await
+            }
+            ETHERTYPE_IPV4 | ETHERTYPE_IPV6 => {
+                // Learn source MAC→IP from frame
+                let src_mac = MacAddress::from(&frame[6..12]);
+                if let Some(src_ip) = extract_src_ip(&frame[ETH_HEADER_SIZE..]) {
+                    self.arp_cache.insert(src_ip, src_mac);
+                }
+                // Strip Ethernet header, write IP packet to TUN
+                self.tun.write_packet(&frame[ETH_HEADER_SIZE..]).await
+            }
+            _ => Ok(()) // Drop non-IP ethertypes
+        }
+    }
+}
+```
+
+> **Existing code validation:** httpf's `src/network/packet.rs` already contains
+> all the building blocks for Virtual TAP: `ETH_HEADER_SIZE = 14`, `MacAddress`
+> type with `BROADCAST`/`ZERO`/`random()`/`httpf_random()`, `ArpPacket` struct,
+> `parse_arp()`, `build_arp_reply()`, and ethertype constants. The Virtual TAP
+> assembles these proven primitives into a coherent L2↔L3 translation layer.
+
+#### Auto-Detection
+
+QuicEther selects the device mode automatically based on platform capabilities:
+
+| Platform | Device Mode | Reason |
+|----------|-------------|--------|
+| Linux (desktop) | Native TAP | Full TAP support via `/dev/net/tun` |
+| macOS | Native TAP | `feth` or third-party TAP drivers |
+| Windows | Native TAP | WinTap or similar |
+| iOS | Virtual TAP | Only `NEPacketTunnelProvider` (TUN/L3) available |
+| Android | Virtual TAP | Only `VpnService.Builder` (TUN/L3) available |
+| Docker / containers | Virtual TAP (fallback) | TAP may require `--cap-add=NET_ADMIN`; Virtual TAP works without |
+
+Config override (see Chapter 15):
+```toml
+[network]
+device_mode = "auto"   # "auto" | "tap" | "virtual_tap"
+```
+
+#### Transparency Guarantee
+
+From the server's perspective, there is no difference between a Native TAP client and a Virtual TAP client:
+- Both send and receive Ethernet frames over QUIC
+- Both have assigned MAC addresses
+- Both participate in the same Virtual Hub broadcast domain
+- The MAC learning table treats them identically
+
+The only difference is invisible: on Virtual TAP clients, ARP is handled in userspace rather than by the kernel, and Ethernet headers are synthesized rather than produced by the OS network stack.
+
+### 10.1.4 Addressing (Physical Router via DHCP)
+
+QuicEther does **not** assign IP addresses. Instead:
+- The TAP interface joins a Virtual Hub (Ethernet segment)
+- DHCP requests from the client pass through the overlay as normal Ethernet frames
+- The physical router (or DHCP server) on the bridged LAN responds
+- The client receives its IP address, gateway, DNS — same as being on the physical LAN
+
+This is the key difference from L3 VPNs:
+- No CIDR pool management on the server
+- No IP allocation logic
+- The physical network infrastructure handles all L3 concerns
+
+Optional: If no physical router is available (e.g., cloud-only deployment), **SecureNAT** mode provides built-in DHCP and NAT within the Virtual Hub.
 
 Examples:
-- Personal server: single hub `10.100.0.0/24`, clients get `10.100.0.2-254`
-- Enterprise: multiple hubs per department (`office: 10.100.0.0/24`, `dev: 10.100.1.0/24`)
+- Personal server: single hub `home`, clients DHCP from home router and get `192.168.1.x`
+- Enterprise: multiple hubs per department (`office`, `dev`), each bridged to their physical LAN
 
 ---
 
-## 10.2 Routing Model
+## 10.2 Switching & Forwarding Model
 
-QuicEther needs to decide, for each IP packet:
-- Is it for **this node**?
-- Is it for a subnet **we own**?
-- Is it for a subnet **another node owns**?
-- Should it go via a **bridge** or **mesh peer**?
+QuicEther needs to decide, for each Ethernet frame:
+- Is it for a MAC address on **this hub**?
+- Is it for a MAC address on a **cascaded hub**?
+- Is it **broadcast/multicast** (flood to all ports)?
+- Is it **unknown unicast** (flood or drop)?
 
-### 10.2.1 Local Routing Table (Overlay View)
+### 10.2.1 MAC Learning Table
 
 Conceptual structure:
 
 ```rust
-struct OverlayRoute {
-    destination: IpNet,      // 10.100.0.0/24
-    next_hop: RouteNextHop,  // Local, Server, Bridge
+struct MacEntry {
+    mac: MacAddress,
+    port: SwitchPort,     // Which session/bridge owns this MAC
+    last_seen: Instant,   // For aging
 }
 
-enum RouteNextHop {
-    Local,                    // This hub's subnet
-    Server(SocketAddr),       // Route via QUIC server
-    Bridge(SocketAddr),       // Route via bridge node
-    MeshPeer(String),         // Route via mesh peer server
+enum SwitchPort {
+    Session(SessionId),           // Connected client
+    LocalBridge(BridgeId),        // Physical LAN bridge
+    CascadeTunnel(PeerId),        // Mesh peer hub
 }
 
-struct OverlayRoutingTable {
-    routes: Vec<OverlayRoute>,
-    default_route: Option<RouteNextHop>,
+struct MacTable {
+    entries: HashMap<MacAddress, MacEntry>,
+    aging_timeout: Duration,      // Default: 300s
+    max_entries: usize,           // Default: 8192
 }
 ```
 
 Lookup:
-- Longest-prefix match on `destination`
-- If multiple routes match, choose most specific
+- Exact MAC address match (no prefix matching like IP routing)
+- If MAC not found → unknown unicast → flood to all ports except source
+- Broadcast/multicast → always flood to all ports except source
 
-### 10.2.2 Interaction with OS Routing
+### 10.2.2 Interaction with OS Networking
 
-Two routing layers exist:
+Two layers exist:
 
-1. **OS Routing Table:**
-   - Decides which packets go to `quicether0`
-   - Configured with `ip route` (Linux) or equivalent
+1. **OS Network Stack:**
+   - Treats `quicether0` as a regular Ethernet interface
+   - ARP, DHCP, and all L2 protocols work normally
+   - IP configuration comes from DHCP (physical router)
 
-2. **Overlay Routing Table (inside QuicEther):**
-   - Decides where to send packets read from `quicether0`
+2. **Virtual Hub (inside QuicEther):**
+   - Switches frames between sessions based on MAC addresses
+   - Learns MACs from source addresses of incoming frames
+   - Ages out stale entries
 
-Example (Linux):
+Unlike L3 VPNs, there is no overlay routing table — the Virtual Hub is a transparent Ethernet switch.
 
-```bash
-# Send all traffic for 10.0.0.0/16 to quicether0
-ip route add 10.0.0.0/16 dev quicether0
+### 10.2.3 Virtual Hub Configuration
 
-# Default route remains via physical gateway
-ip route add default via 192.168.1.1 dev eth0
-```
-
-### 10.2.3 Hub Subnet Ownership
-
-Subnets are defined per hub in the server configuration:
+Hubs are defined in the server configuration:
 
 ```toml
 [[hubs]]
 name = "office"
-subnet = "10.100.0.0/24"
+# No CIDR — it's an Ethernet segment, not an IP subnet
 
 [[hubs]]
 name = "factory"
-subnet = "10.100.1.0/24"
+
+[hubs.secure_nat]
+enabled = false  # Physical router handles DHCP/ARP
 ```
 
-Routing effects:
-1. Server installs hub subnets in its routing table as `Local`
-2. Clients receive their hub's subnet info during connection setup
-3. For cross-hub traffic: server routes via internal hub lookup or mesh peer
-4. Bridge mode clients advertise additional LAN subnets through their hub
+Switching effects:
+1. Each hub is an independent broadcast domain (like a VLAN)
+2. Clients joining a hub can communicate at L2 — as if on the same physical switch
+3. Cross-hub traffic requires a router connected to both hubs (or cascade connections)
+4. Local Bridge attaches physical LANs to a hub
 
 ---
 
-## 10.3 Packet Flow: End-to-End Examples
+## 10.3 Frame Flow: End-to-End Examples
 
 ### 10.3.1 Remote Access (Personal VPN)
 
@@ -144,284 +323,336 @@ Scenario: Sarah's laptop → home server (192.168.1.10)
    - Home server:
      ```bash
      quicether server --config server.toml
-     # server.toml defines hub with subnet 192.168.1.0/24
+     # server.toml defines hub "home" with local bridge to eth0
      ```
    - Sarah's laptop:
      ```bash
      quicether connect --server home.example.com:4433
-     # TUN and routes configured automatically from hub info
+     # TAP interface created, joins "home" hub
+     # DHCP request through tunnel → home router responds
+     # Laptop gets 192.168.1.x from home router
      ```
 
 2. **Data Flow:**
    ```text
    app (laptop) → TCP connect to 192.168.1.10
              ↓
-   kernel: route 192.168.1.0/24 via quicether0
+   kernel: ARP for 192.168.1.10 → Ethernet frame
              ↓
-   TUN quicether0: QuicEther reads IP packet
+   TAP quicether0: QuicEther reads Ethernet frame
              ↓
-   overlay routing: dest 192.168.1.10 ∈ hub subnet → route via server
+   QUIC: send frame to server
              ↓
-   QUIC: send to server
+   Virtual Hub: lookup dest MAC in MAC table
              ↓
-   Home node: receives packet, writes to its kernel via TUN
+   dest MAC found on Local Bridge port → forward to bridge
              ↓
-   kernel (home): route to 192.168.1.10 via local LAN (bridge mode)
+   Local Bridge: write frame to physical LAN interface (eth0)
              ↓
-   home server: receives packet
+   physical switch delivers to 192.168.1.10
    ```
 
 ### 10.3.2 Site-to-Site
 
-Scenario: HQ (10.0.0.0/16) ↔ Factory (10.1.0.0/16)
+Scenario: HQ LAN ↔ Factory LAN
 
 1. **Configuration:**
    - HQ server:
      ```bash
      quicether server --config hq-server.toml
-     # Defines hub "hq" with subnet 10.0.0.0/16
+     # Hub "corp" with local bridge to HQ LAN
      ```
    - Factory server:
      ```bash
      quicether server --config factory-server.toml
-     # Defines hub "factory" with subnet 10.1.0.0/16
+     # Hub "corp" with local bridge to Factory LAN
      ```
-   - Mesh connection between them:
+   - Cascade connection between them:
      ```toml
      # In hq-server.toml
      [[mesh.peers]]
      address = "factory.example.com:4433"
      service_token = "mesh-secret"
+     hub = "corp"
      ```
 
-2. **Data Flow (HQ → Factory):**
+2. **Data Flow (HQ host → Factory host):**
    ```text
-   host at HQ sends packet to 10.1.0.50
+   host at HQ (10.0.0.5) sends frame to 10.1.0.50
              ↓
-   HQ router: dest 10.1.0.0/16 → next hop via HQ server overlay
+   ARP resolves 10.1.0.50 → MAC aa:bb:cc:dd:ee:ff
              ↓
-   HQ server: sees packet for 10.1.0.50
+   Ethernet frame enters HQ server via Local Bridge
              ↓
-   OS route: 10.1.0.0/16 via quicether0
+   Virtual Hub: lookup MAC aa:bb:cc:dd:ee:ff
              ↓
-   TUN → QuicEther → overlay route: 10.1.0.0/16 owned by factory hub (via mesh)
+   MAC found on Cascade Tunnel port → forward to Factory peer
              ↓
-   QUIC tunnel to factory server (via mesh peer connection)
+   QUIC tunnel to Factory server
              ↓
-   factory server writes packet to local LAN
+   Factory Virtual Hub: lookup MAC → Local Bridge port
+             ↓
+   Factory Local Bridge: write frame to physical LAN
+             ↓
+   physical switch delivers to 10.1.0.50
    ```
 
 ---
 
-## 10.4 Bridge Mode (Site-to-Site Forwarding)
+## 10.4 Local Bridge (Physical LAN Bridging)
 
-In httpf, **bridge mode** was validated as the way to connect on-premise LANs through the overlay. Bridge nodes are clients that also forward traffic for local subnets.
+In QuicEther's L2 architecture, **Local Bridge** is the mechanism to connect a physical LAN to a Virtual Hub — equivalent to plugging a cable from a physical switch into the virtual switch.
 
 ### 10.4.1 Role Configuration
 
 Example:
 
-```bash
-# Bridge client connecting to cloud server, forwarding local LAN
-quicether bridge \
-  --server vpn.example.com:4433 \
-  --local-subnet 192.168.1.0/24
+```toml
+# In server.toml
+[[hubs]]
+name = "office"
+
+[hubs.local_bridge]
+interface = "eth0"        # Physical interface to bridge
 ```
 
-Bridge effects:
-- Connects to server like a normal client
-- Advertises local subnet to the hub
-- Forwards packets between local LAN and the overlay tunnel
-- Other clients in the same hub can reach `192.168.1.0/24` through the bridge
+Local Bridge effects:
+- All Ethernet frames from the physical interface are forwarded into the Virtual Hub
+- All frames from the Virtual Hub destined for MACs on the physical LAN are forwarded out
+- Remote clients appear to be "on the same LAN" as physical devices
+- DHCP, ARP, and broadcast traffic flow transparently
 
-### 10.4.2 Packet Processing at Bridge
+### 10.4.2 Frame Processing at Local Bridge
 
-Bridge receives encapsulated packet destined for an IP within its advertised local subnet.
+Physical LAN → Virtual Hub:
+```text
+1. Read Ethernet frame from physical interface (raw socket or bridge helper)
+2. Learn source MAC → Local Bridge port
+3. Forward frame into Virtual Hub for switching
+4. Hub forwards to matching session/cascade port (or floods if unknown)
+```
 
-Path:
-- QuicEther decapsulates IP packet
-- Checks destination against bridge's local subnet:
-  - If `dest ∈ local_subnet`:
-    - Writes packet to local network interface (not TUN)
-  - Else:
-    - Sends back to server for routing to correct hub/client
+Virtual Hub → Physical LAN:
+```text
+1. Hub determines dest MAC is on Local Bridge port
+2. Write frame to physical interface
+3. Physical switch delivers to destination
+```
 
 ### 10.4.3 Policy Enforcement
 
-Bridge nodes apply the same policy as the server:
-- Each forwarded packet checked against firewall and policy rules
-- Anti-spoofing: verify source IP matches bridge's assigned virtual IP or local subnet
+Local Bridge nodes apply hub policy:
+- Each forwarded frame checked against L2/L3/L4 firewall rules
+- Anti-spoofing: verify source MAC is registered to the correct port
+- MAC limit per port prevents flooding attacks
 - If not permitted: drop + log to audit trail
 
 ---
 
-## 10.5 Routing Algorithms & Conflict Resolution
+## 10.5 MAC Learning & Forwarding
 
-### 10.5.1 Longest-Prefix Match
+### 10.5.1 Learning Process
 
-When multiple routes could match a destination:
-- Always choose the most specific subnet
+When the Virtual Hub receives a frame:
+1. Extract source MAC address
+2. Record: `source_mac → ingress_port` with timestamp
+3. If MAC was already known on a different port → update (MAC migration)
+4. If MAC table is full → reject or evict oldest entry
 
-Example:
+### 10.5.2 Forwarding Decisions
 
-- Routes:
-  - `10.0.0.0/8 → Node(A)`
-  - `10.0.1.0/24 → Node(B)`
-- Destination: `10.0.1.42`
-  - Use `/24` route → Node(B)
+For each frame's destination MAC:
 
-### 10.5.2 Route Priority
+| Destination | Action |
+|---|---|
+| Known unicast (in MAC table) | Forward to specific port |
+| Unknown unicast (not in table) | Flood to all ports except source |
+| Broadcast (`ff:ff:ff:ff:ff:ff`) | Flood to all ports except source |
+| Multicast | Flood to all ports except source |
 
-If there is a **Local** and a **MeshPeer** route for the same prefix:
-- Prefer `Local` (direct ownership)
+This mirrors how a physical Ethernet switch works.
 
-If there is a **Server** and a **Bridge** route:
-- Prefer `Server` (direct connection) when possible
+### 10.5.3 MAC Table Aging
 
-This aligns with Principle 3 (Direct Connection When Possible).
+- Entries expire after `aging_timeout` (default: 300 seconds)
+- Each frame from a MAC resets its timer
+- Expired entries are removed → next frame to that MAC triggers flooding
+- This handles device mobility and network changes automatically
 
-### 10.5.3 Default Route in Overlay
+### 10.5.4 MAC Table Limits & Security
 
-Some nodes may set a default overlay route for unknown subnets:
-
-```toml
-[routing]
-default_route = "server"  # or specific mesh peer
-```
-
-Effects:
-- Packets whose destination does not match any specific overlay route go to the server
-- Typical for:
-  - Priya's desktop (all internet traffic through server)
-  - Remote workers sending all corp traffic via company server
+- `max_entries` per hub (default: 8192)
+- `max_macs_per_port` per session/bridge (default: 16)
+- Exceeding limits: new MACs are rejected (prevents MAC flooding attacks)
+- Static MAC entries can be configured for critical devices
 
 ---
 
-## 10.6 Interaction with NAT & Local Networks
+## 10.6 Optional SecureNAT & Network Services
 
-### 10.6.1 Client Mode vs Bridge Mode
+### 10.6.1 When No Physical Router Exists
 
-Nodes may operate in two broad modes:
+For cloud-only or ad-hoc deployments where no physical LAN is bridged, the Virtual Hub can optionally provide network services via **SecureNAT**:
 
-1. **Client (Host-Only):**
-   - Only traffic originating from the host uses QuicEther
-   - OS routing table directs specific prefixes to `quicether0`
+```toml
+[[hubs]]
+name = "cloud-only"
 
-2. **Bridge (Router):**
-   - Node forwards traffic for local LAN machines
-   - IP forwarding enabled in OS
-   - OS routes from LAN interfaces into `quicether0`
-
-Example enabling Linux forwarding:
-
-```bash
-echo 1 > /proc/sys/net/ipv4/ip_forward
+[hubs.secure_nat]
+enabled = true
+dhcp_start = "10.100.0.100"
+dhcp_end = "10.100.0.200"
+gateway = "10.100.0.1"
+subnet_mask = "255.255.255.0"
+dns = ["8.8.8.8", "8.8.4.4"]
 ```
+
+SecureNAT provides:
+- Built-in DHCP server for clients in the hub
+- Virtual gateway for internet access (with NAT)
+- ARP responses for the virtual gateway
+
+**Default: disabled.** Physical router is preferred. SecureNAT is a convenience for environments without existing infrastructure.
 
 ### 10.6.2 NAT on Edge Servers
 
-For internet access via QuicEther server:
-- Server may perform NAT between overlay addresses and public IP
+For internet access via a QuicEther server with Local Bridge:
+- The physical router/gateway handles NAT naturally
+- No special configuration in QuicEther — traffic exits via the bridge as normal LAN traffic
 
-Example (Linux iptables/nftables):
+For SecureNAT mode:
+- QuicEther performs NAT between virtual hub addresses and the server's physical interface
 
 ```bash
-# Masquerade overlay subnet out to internet via eth0
-iptables -t nat -A POSTROUTING -s 100.64.0.0/10 -o eth0 -j MASQUERADE
+# Only needed for SecureNAT with internet access
+iptables -t nat -A POSTROUTING -s 10.100.0.0/24 -o eth0 -j MASQUERADE
 ```
-
-This is **outside** QuicEther; we leverage existing OS firewall/NAT tools.
 
 ---
 
 ## 10.7 Configuration Patterns
 
-### 10.7.1 Personal Laptop
+### 10.7.1 Personal Laptop (Remote Client)
 
-- Only routes specific subnets (home, office) through QuicEther
+- Joins a Virtual Hub, receives IP from physical router via DHCP through the tunnel
 
 ```bash
 quicether connect --server home.example.com:4433
-# Routes configured automatically from hub info
-# Or manually add additional routes:
-ip route add 10.0.0.0/16 dev quicether0      # office
+# TAP interface created
+# DHCP through tunnel → gets IP from home router
+# All LAN services accessible transparently
 ```
 
-### 10.7.2 Always-On Server (Home)
-
-```bash
-# QuicEther server on home server
-quicether server --config server.toml
-# server.toml defines hub with subnet and bridge support
-```
-
-### 10.7.3 Split-Tunnel vs Full-Tunnel
-
-- **Split-Tunnel:** Only corporate/homelab subnets go through overlay (default)
-- **Full-Tunnel:** All traffic goes through overlay server
+### 10.7.2 Home Server (with Local Bridge)
 
 ```toml
-# Full-tunnel configuration
+# server.toml
+[server]
+listen = "0.0.0.0:4433"
+
+[[hubs]]
+name = "home"
+
+[hubs.local_bridge]
+interface = "eth0"    # Bridge to home LAN
+```
+
+```bash
+quicether server --config server.toml
+```
+
+### 10.7.3 Cloud Server (SecureNAT, No Physical LAN)
+
+```toml
+# server.toml
+[server]
+listen = "0.0.0.0:4433"
+
+[[hubs]]
+name = "team"
+
+[hubs.secure_nat]
+enabled = true
+dhcp_start = "10.100.0.100"
+dhcp_end = "10.100.0.200"
+gateway = "10.100.0.1"
+subnet_mask = "255.255.255.0"
+```
+
+### 10.7.4 Full-Tunnel vs Split-Tunnel
+
+- **Split-Tunnel:** Only access bridged LAN resources (default with Local Bridge)
+- **Full-Tunnel:** All traffic through overlay (requires gateway/SecureNAT)
+
+```toml
+# Full-tunnel: route all traffic through hub
 [client]
 server = "vpn.example.com:4433"
 full_tunnel = true
 
-# Split-tunnel with specific routes
+# Split-tunnel: only hub traffic (default)
 [client]
 server = "vpn.example.com:4433"
-routes = ["10.0.0.0/8", "192.168.1.0/24"]
 ```
 
 ---
 
 ## 10.8 Performance & Scaling Considerations
 
-### 10.8.1 Packet Processing Path
+### 10.8.1 Frame Processing Path
 
-We must keep per-packet overhead minimal:
-- Avoid unnecessary copies between TUN buffer and QUIC
-- Batch packets when possible
+Per-frame overhead must be minimal:
+- Avoid unnecessary copies between TAP buffer and QUIC
+- Batch frames when possible (FrameBatch)
 
 Implementation hints:
-- Pre-allocated buffers for TUN reads
-- Reuse encapsulation headers
+- Pre-allocated buffers for TAP reads
+- Zero-copy frame forwarding within the Virtual Hub
 - Use async I/O with bounded task queues
+- MAC table lookups via HashMap for O(1) average case
 
-### 10.8.2 Route Table Size
+### 10.8.2 MAC Table Size
 
 For large deployments:
-- Many subnets may be advertised
-- Per-node route table must still be efficient
+- Each device adds one or more MACs to the table
+- Hub-level and port-level limits prevent unbounded growth
 
 Approaches:
-- Use prefix tree (radix/patricia trie) for O(log N) lookups
-- Cache hot routes
+- HashMap for O(1) lookup (exact match, not prefix)
+- Periodic aging sweep (every 30s)
+- Lazy eviction on lookup miss
 
-### 10.8.3 Control vs Data Separation
+### 10.8.3 Broadcast Storm Prevention
 
-Overlay routing table is configured by:
-- Server hub configuration
-- Mesh peer route advertisements
-- Bridge node subnet announcements
-- Static overrides from config
-- Policy engine (may inject denies or exceptions)
+L2 networks are susceptible to broadcast storms:
+- Rate-limit broadcast/multicast frames per port
+- Track broadcast frame rates and throttle if exceeded
+- Hub-level broadcast budget prevents cascade amplification
 
-Data plane should avoid heavy locks on the routing table:
-- Use read-optimized structures (e.g., RCU, lock-free tries) where appropriate
+### 10.8.4 Control vs Data Separation
+
+MAC table is updated by:
+- Source MAC learning from data frames
+- Static configuration
+- Policy engine (MAC allow/deny lists)
+
+Data plane should avoid heavy locks on the MAC table:
+- Use read-optimized structures (e.g., DashMap, lock-free HashMap)
+- Separate learning (write) path from forwarding (read) path
 
 ---
 
 ## Summary
 
 In this chapter we:
-- Described how QuicEther uses a TUN interface (`quicether0`) to integrate with OS networking
-- Defined the hub-based IP allocation model with CIDR pools and anti-spoofing
-- Defined the overlay routing model (local, server, bridge, mesh peer)
-- Walked through end-to-end packet flows for personal VPN and site-to-site via mesh
-- Clarified **bridge mode** for forwarding local LAN subnets through the overlay
-- Covered routing decisions, conflict resolution, NAT interaction, and configuration patterns
+- Described how QuicEther uses a TAP interface (`quicether0`) to integrate with OS networking at Layer 2
+- Explained that IP addressing comes from physical routers via DHCP through the tunnel — no server-side IP management
+- Defined the MAC-based switching model: learn source MACs, forward by destination MAC, flood unknowns
+- Walked through end-to-end frame flows for personal VPN and site-to-site via cascade
+- Described **Local Bridge** for connecting physical LANs to Virtual Hubs
+- Covered MAC table aging, limits, broadcast storm prevention, and optional SecureNAT
 
-This completes the core data plane story: from packets on the host, through QuicEther, across QUIC, and back into remote networks.
+This completes the core data plane story: from Ethernet frames on the host, through QuicEther's Virtual Hub, across QUIC, and back into remote networks — all at Layer 2.
 
 **Next Chapter:** We will move up to the **daemon architecture & CLI/API design**, explaining how users and operators interact with QuicEther day-to-day.
 

@@ -1,7 +1,8 @@
 # QuicEther Architecture Diagrams
 
 > **Post-httpf Revision:** These diagrams reflect the validated hub-based,
-> server mesh architecture ported from HTTP Fabric to native QUIC.
+> server mesh architecture ported from HTTP Fabric to native QUIC,
+> using Layer 2 (TAP/Ethernet) switching inspired by SoftEther.
 
 ## Diagram 1: System Architecture
 
@@ -11,12 +12,12 @@ graph TD
     subgraph Server["QuicEther Server"]
         QUIC["QUIC Listener (TLS 1.3)"]
         AUTH["Auth Service<br/>(Ed25519 / Password / Token)"]
-        HUB["Hub Manager<br/>(Multi-tenant IP Pools)"]
-        FW["Firewall Engine<br/>(Proxmox-style)"]
-        ROUTER["Router + Virtual NAT"]
+        HUB["Hub Manager<br/>(Virtual Hubs / Ethernet Segments)"]
+        FW["Firewall Engine<br/>(L2/L3/L4)"]
+        SWITCH["Virtual Hub Switch<br/>(MAC Learning)"]
         AUDIT["Audit Logger<br/>(JSONL + Syslog)"]
-        MESH["Mesh Manager<br/>(Cascade Routing)"]
-        TUN_S["TUN Interface"]
+        MESH["Mesh Manager<br/>(Cascade Connections)"]
+        TAP_S["TAP Interface / Local Bridge"]
     end
 
     %% Client layer
@@ -24,7 +25,9 @@ graph TD
         CONN["QUIC Connection"]
         MP["Multipath Manager"]
         PERF["Performance Profile<br/>(latency/balanced/throughput)"]
-        TUN_C["TUN Interface"]
+        DEV["Device Abstraction Layer"]
+        TAP_C["Native TAP<br/>(Linux/macOS/Windows)"]
+        VTAP["Virtual TAP<br/>(iOS/Android/containers)<br/>TUN + L2↔L3 translation"]
     end
 
     %% Physical networks
@@ -34,17 +37,19 @@ graph TD
     end
 
     %% Client to server flow
-    TUN_C -->|"IP packets"| CONN
-    CONN -->|"PacketBatch (LZ4 + ChaCha20)"| MP
+    TAP_C -->|"Ethernet frames"| DEV
+    VTAP -->|"Ethernet frames<br/>(synthesized)"| DEV
+    DEV --> CONN
+    CONN -->|"FrameBatch (LZ4 + ChaCha20)"| MP
     MP <--> ISP1
     MP <--> ISP2
     ISP1 & ISP2 -->|"QUIC streams"| QUIC
     QUIC --> AUTH
     AUTH --> HUB
     HUB --> FW
-    FW --> ROUTER
-    ROUTER <--> TUN_S
-    ROUTER --> AUDIT
+    FW --> SWITCH
+    SWITCH <--> TAP_S
+    SWITCH --> AUDIT
     HUB --> MESH
 
     %% Styling
@@ -52,8 +57,8 @@ graph TD
     classDef client fill:#e8f5e9,stroke:#43a047;
     classDef underlay fill:#f3e5f5,stroke:#8e24aa;
 
-    class Server,QUIC,AUTH,HUB,FW,ROUTER,AUDIT,MESH,TUN_S server;
-    class Client,CONN,MP,PERF,TUN_C client;
+    class Server,QUIC,AUTH,HUB,FW,SWITCH,AUDIT,MESH,TAP_S server;
+    class Client,CONN,MP,PERF,DEV,TAP_C,VTAP client;
     class Underlay,ISP1,ISP2 underlay;
 ```
 
@@ -64,21 +69,21 @@ graph TD
     %% Three-region mesh
     subgraph US["US-East Server"]
         S1["Server 1"]
-        H1["Hub: 10.20.1.0/24"]
+        H1["Hub: us-east"]
         C1A["Client A"]
         C1B["Client B"]
     end
 
     subgraph EU["EU-West Server"]
         S2["Server 2"]
-        H2["Hub: 10.20.2.0/24"]
+        H2["Hub: eu-west"]
         C2A["Client C"]
         C2B["Client D"]
     end
 
     subgraph AP["AP-South Server"]
         S3["Server 3"]
-        H3["Hub: 10.20.3.0/24"]
+        H3["Hub: ap-south"]
         C3A["Client E"]
     end
 
@@ -92,8 +97,8 @@ graph TD
     S2 <-->|"Mesh QUIC<br/>(shared token)"| S3
     S1 <-->|"Mesh QUIC<br/>(shared token)"| S3
 
-    %% Cascade routing example
-    C1A -.->|"Cascade route:<br/>A → S1 → S2 → C"| C2A
+    %% Cascade connection example
+    C1A -.->|"Cascade:<br/>A → S1 → S2 → C"| C2A
 
     %% Styling
     classDef server fill:#e3f2fd,stroke:#1e88e5;
@@ -130,14 +135,14 @@ sequenceDiagram
     A->>H: Request hub access
     H->>H: Check access control (identities/groups)
     H->>S: Create session
-    S->>S: Allocate IP from CIDR pool
+    S->>S: Assign MAC, join Virtual Hub
     S->>S: Apply firewall rules
-    S-->>C: Session established (assigned IP, routes, DNS)
+    S-->>C: Session established (hub, MAC, TAP config)
     
     loop Data plane
-        C->>Q: PacketBatch (LZ4 compressed, ChaCha20 encrypted)
-        Q->>H: Route through firewall + NAT
-        H-->>C: Response packets
+        C->>Q: FrameBatch (LZ4 compressed, ChaCha20 encrypted)
+        Q->>H: Switch through firewall + MAC table
+        H-->>C: Response frames
     end
 ```
 
@@ -146,21 +151,21 @@ sequenceDiagram
 ```mermaid
 graph LR
     subgraph Server["QuicEther Server"]
-        subgraph HubEng["Hub: engineering<br/>10.20.1.0/24"]
-            E1["Alice<br/>10.20.1.2"]
-            E2["Bob<br/>10.20.1.3"]
+        subgraph HubEng["Hub: engineering"]
+            E1["Alice<br/>MAC: a1:b2:c3:.."]
+            E2["Bob<br/>MAC: d4:e5:f6:.."]
             FW1["Firewall:<br/>ACCEPT tcp/22,443<br/>DROP all"]
         end
         
-        subgraph HubGuest["Hub: guests<br/>10.20.2.0/24"]
-            G1["Visitor<br/>10.20.2.2"]
+        subgraph HubGuest["Hub: guests"]
+            G1["Visitor<br/>MAC: 01:23:45:.."]
             FW2["Firewall:<br/>ACCEPT tcp/80,443<br/>DROP all"]
         end
         
-        subgraph HubBridge["Hub: datacenter<br/>10.20.3.0/24"]
-            B1["Site-B Bridge<br/>10.20.3.2"]
+        subgraph HubBridge["Hub: datacenter"]
+            B1["Site-B Bridge"]
             FW3["Firewall:<br/>ACCEPT all<br/>(trusted)"]
-            LAN["→ 192.168.1.0/24"]
+            LAN["Local Bridge → eth0<br/>(192.168.1.0/24)"]
         end
     end
     
@@ -170,4 +175,55 @@ graph LR
     
     %% Notes
     B1 --> LAN
+```
+
+## Diagram 5: Device Abstraction Layer (Native TAP vs Virtual TAP)
+
+```mermaid
+graph TD
+    subgraph NativeMode["Native TAP Mode (Linux/macOS/Windows)"]
+        APP_N["Application"]
+        KERNEL_N["Kernel Network Stack"]
+        TAP_N["TAP Device (quicether0)<br/>Raw Ethernet frames"]
+        QE_N["QuicEther Client"]
+    end
+
+    subgraph VirtualMode["Virtual TAP Mode (iOS/Android/Containers)"]
+        APP_V["Application"]
+        KERNEL_V["Kernel Network Stack"]
+        TUN_V["TUN Device<br/>Raw IP packets only"]
+        VTAP_V["Virtual TAP Engine"]
+        ARP_V["ARP Proxy / Cache<br/>MAC↔IP learning"]
+        QE_V["QuicEther Client"]
+    end
+
+    subgraph Overlay["QUIC Overlay (Always L2)"]
+        TUNNEL["QUIC Tunnel<br/>Ethernet Frames"]
+        HUB["Virtual Hub<br/>(MAC Switch)"]
+    end
+
+    %% Native TAP flow
+    APP_N --> KERNEL_N
+    KERNEL_N -->|"ARP + Ethernet"| TAP_N
+    TAP_N -->|"Ethernet frame"| QE_N
+    QE_N -->|"Ethernet frame"| TUNNEL
+
+    %% Virtual TAP flow
+    APP_V --> KERNEL_V
+    KERNEL_V -->|"IP packet"| TUN_V
+    TUN_V -->|"IP packet"| VTAP_V
+    ARP_V <-->|"MAC lookup"| VTAP_V
+    VTAP_V -->|"+ Ethernet header<br/>(14 bytes)"| QE_V
+    QE_V -->|"Ethernet frame"| TUNNEL
+
+    TUNNEL --> HUB
+
+    %% Styling
+    classDef native fill:#e8f5e9,stroke:#43a047;
+    classDef virtual fill:#fff3e0,stroke:#fb8c00;
+    classDef overlay fill:#e3f2fd,stroke:#1e88e5;
+
+    class NativeMode,APP_N,KERNEL_N,TAP_N,QE_N native;
+    class VirtualMode,APP_V,KERNEL_V,TUN_V,VTAP_V,ARP_V,QE_V virtual;
+    class Overlay,TUNNEL,HUB overlay;
 ```
