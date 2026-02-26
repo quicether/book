@@ -34,8 +34,8 @@ We assume the following potential adversaries:
    - Attacker has access to node’s private key and config
 
 4. **Malicious Participant**
-   - Legitimate node key, but behaves badly in the overlay
-   - Attempts DHT poisoning, policy abuse, etc.
+   - Legitimate credentials, but behaves badly in the overlay
+   - Attempts hub abuse, policy violations, IP spoofing, etc.
 
 5. **Curious Infrastructure Provider**
    - ISP, cloud provider hosting gateways or bootstrap nodes
@@ -56,14 +56,36 @@ For those threat models, systems like Tor and specialized hardened OSes are more
 
 ### 9.2.1 Node Identity
 
-Each node has a long‑lived Ed25519 keypair:
+Each node has a long-lived Ed25519 keypair:
 - `priv`: private signing key (must be protected)
-- `pub`: public key (distributed via DHT and config)
+- `pub`: public key (registered with server or exchanged via config)
 
-NodeId derived as in Chapter 7:
-- `NodeId = SHA1(pub)` (160‑bit identifier)
+NodeId derived using BLAKE3 (not SHA-1):
+- `NodeId = BLAKE3(pub)` (256-bit identifier, truncated to 160-bit for compatibility)
 
-### 9.2.2 TLS 1.3 Mutual Authentication
+BLAKE3 was chosen over SHA-1 for:
+- Cryptographic strength (no known attacks)
+- Speed (3x faster than SHA-256 on modern CPUs)
+- Tree-hashing support for future extensibility
+
+### 9.2.2 Three-Tier Authentication (Proven in httpf)
+
+QuicEther supports three authentication methods, validated in httpf:
+
+| Tier | Method | Use Case |
+|------|--------|----------|
+| 1 | **Ed25519 Identity** | Cryptographic identity; highest security |
+| 2 | **Password** (Argon2id) | Simple setup for personal/small deployments |
+| 3 | **Service Token** | Pre-shared key for server mesh peers |
+
+Authentication flow:
+1. QUIC connection established with TLS 1.3
+2. Client sends auth credentials on control stream
+3. Server validates against configured auth method
+4. On success: assigns hub, allocates virtual IP, opens data streams
+5. On failure: connection rejected, event logged to audit trail
+
+### 9.2.3 TLS 1.3 Transport Security
 
 Every QUIC connection is protected by TLS 1.3.
 
@@ -79,22 +101,24 @@ Verification steps:
 
 This prevents classic MITM attacks as long as key distribution is correct.
 
-### 9.2.3 Key Distribution Models
+### 9.2.4 Key Distribution Models
 
 Different deployments can choose different models:
 
-1. **Personal/Small Mesh:**
-   - Keys generated locally
-   - Public keys exchanged via out‑of‑band channels (QR codes, SSH, email)
+1. **Personal/Small Deployment:**
+   - Password auth or static Ed25519 keys
+   - Public keys exchanged via out-of-band channels (QR codes, SSH, email)
    - Trust anchor: user themselves
 
 2. **Small Business:**
+   - Password auth with Argon2id hashing
    - Simple internal CA or static trust store
    - Admin provisions keys/certs on devices
 
 3. **Enterprise:**
-   - Integration with existing PKI (Active Directory Certificate Services, Vault, etc.)
+   - Ed25519 identity with PKI integration (Active Directory, Vault, etc.)
    - Automated enrollment/renewal
+   - Service tokens for server mesh interconnection
 
 QuicEther does **not** hardcode a single PKI model; it exposes flexible hooks.
 
@@ -110,14 +134,39 @@ Default stance:
 - **Deny by default, allow by policy**
 - No implicit trust based on network location or IP address alone
 
-### 9.3.2 Policy Model
+### 9.3.2 Policy Model (Proven in httpf)
 
-Policy is evaluated per **packet** (or per flow) using:
-- Source NodeId
-- Destination IP / subnet
-- Optional metadata (tags, time of day, etc.)
+QuicEther implements two complementary policy engines, validated in httpf:
 
-Conceptual structure:
+**Firewall Engine** (Proxmox-style ACL):
+- Per-hub packet filtering rules
+- First-match evaluation order
+- Supports: allow/deny, src/dst IP, port, protocol, ICMP type
+
+```toml
+# Firewall rules (first match wins)
+[[firewall.rules]]
+action = "allow"
+src = "10.100.0.0/24"
+dst = "10.100.0.0/24"
+comment = "Allow intra-hub traffic"
+
+[[firewall.rules]]
+action = "allow"
+src = "10.100.0.0/24"
+dst = "0.0.0.0/0"
+port = "80,443"
+protocol = "tcp"
+comment = "Allow web traffic"
+
+[[firewall.rules]]
+action = "deny"
+src = "0.0.0.0/0"
+dst = "0.0.0.0/0"
+comment = "Default deny"
+```
+
+**Policy Engine** (per-identity L3/L4 rules):
 
 ```toml
 # /etc/quicether/policy.toml
@@ -142,9 +191,9 @@ object = "*"
 action = "deny"
 ```
 
-### 9.3.3 Policy Evaluation
+### 9.3.3 Policy Evaluation (httpf's Proven Model)
 
-Implementation concept:
+Implementation from httpf:
 
 ```rust
 enum Action { Allow, Deny }
@@ -192,20 +241,31 @@ members = ["node_maria_laptop", "node_remote_sales1"]
 ### 9.4.1 Encryption Scope
 
 All traffic across QuicEther tunnels is encrypted:
-- Control plane (DHT RPCs over QUIC, control streams)
-- Data plane (encapsulated IP packets)
+- Control plane (mesh protocol, control streams)
+- Data plane (encapsulated IP packets via PacketBatch)
 
 There is **no plaintext mode**.
 
 ### 9.4.2 Algorithms
 
-Relying on TLS 1.3 and QUIC, typical cipher suites:
-- `TLS_AES_128_GCM_SHA256`
-- `TLS_CHACHA20_POLY1305_SHA256`
+Primary cipher suite (chosen for httpf, carried forward):
+- **ChaCha20-Poly1305** — AEAD encryption (fast on non-AES-NI hardware, e.g., mobile)
+- **X25519** — Ephemeral key exchange (ECDH)
+- **BLAKE3** — Hashing (identity derivation, integrity)
+- **Ed25519** — Signing (identity keys)
+
+TLS 1.3 cipher suites supported:
+- `TLS_CHACHA20_POLY1305_SHA256` (preferred)
+- `TLS_AES_128_GCM_SHA256` (fallback on AES-NI hardware)
+
+Post-quantum readiness:
+- **ML-KEM-768** (NIST FIPS 203) hybrid key exchange prepared for future activation
+- Architecture supports cipher agility without protocol changes
 
 Properties:
 - AEAD (Authenticated Encryption with Associated Data)
 - Integrity and confidentiality in one step
+- No plaintext mode — ever
 
 ### 9.4.3 Forward Secrecy
 
@@ -219,40 +279,33 @@ TLS 1.3 provides forward secrecy via ephemeral key exchange:
 
 Enterprises (and many small businesses) need an audit trail.
 
-### 9.5.1 What We Log
+### 9.5.1 What We Log (httpf's Proven Model)
 
-Without leaking sensitive payloads, we log:
+Without leaking sensitive payloads, httpf validated logging:
 - Connection events:
-  - `timestamp, src_node, dest_node, src_ip, dest_ip, protocol, bytes_sent, bytes_recv, duration`
+  - `timestamp, identity, src_ip, virtual_ip, hub, bytes_sent, bytes_recv, duration`
 - Policy decisions:
-  - `timestamp, src_node, dest_ip, action (allow|deny), rule_id`
-- Security‑relevant events:
-  - Failed authentications
-  - Suspicious patterns (many denied attempts)
+  - `timestamp, identity, src_ip, dst_ip, action (allow|deny), rule_id`
+- Security-relevant events:
+  - Failed authentications (with rate limiting on log volume)
+  - Firewall denials
+  - Session creation/destruction
+  - Admin API access
 
 ### 9.5.2 Log Format
 
-Structured logs (JSON lines):
+Structured logs (JSONL — JSON Lines, one event per line):
 
 ```json
-{
-  "ts": "2025-11-20T10:15:32Z",
-  "event": "connection",
-  "src_node": "node_sarah_laptop",
-  "dest_node": "node_hq_gateway",
-  "src_ip": "100.64.0.10",
-  "dest_ip": "10.0.0.5",
-  "protocol": "tcp",
-  "bytes_sent": 123456,
-  "bytes_recv": 234567,
-  "duration_ms": 5023
-}
+{"ts":"2025-11-20T10:15:32Z","event":"session_created","identity":"sarah","hub":"office","virtual_ip":"10.100.0.5","src_ip":"203.0.113.42"}
+{"ts":"2025-11-20T10:15:33Z","event":"firewall_deny","identity":"sarah","src":"10.100.0.5","dst":"10.200.0.1","port":22,"rule":"deny-ssh"}
 ```
 
 Logs can be shipped to:
-- Local file (default)
-- Syslog
+- Local file (default) — rotated by size/time
+- Syslog (RFC 5424) — native integration
 - Central log collectors (Elastic, Loki, Splunk) via sidecar agents
+- Prometheus metrics endpoint for real-time monitoring
 
 ### 9.5.3 Privacy Considerations
 
@@ -293,37 +346,40 @@ Possible strategies:
    - Restarts node
 
 2. **Automated Rotation:**
-   - Periodic key rollover via management API
-   - Coordinated update of DHT records and policy
+   - Periodic key rollover via admin API
+   - Coordinated update of server configuration and policy
 
 ### 9.6.3 Handling Compromise
 
 If a node key is suspected compromised:
 
-1. Mark its NodeId as **revoked** in central policy or revocation list
+1. Mark its identity as **revoked** in server policy or revocation list
 2. Propagate revocation:
-   - Update DHT with a revocation record (for public meshes)
-   - Distribute updated policy to all nodes
+   - Update server configuration to reject the identity
+   - Distribute updated policy to all mesh peers
 3. Rotate key on affected node (if still controllable)
-4. Monitor logs for suspicious activity from that NodeId
+4. Review audit logs for suspicious activity from that identity
 
 ---
 
-## 9.7 Security of Gateways
+## 9.7 Security of Servers & Hubs
 
-Gateway nodes have special responsibilities:
-- They forward traffic for others when direct paths fail
+Server nodes have special responsibilities:
+- They manage hubs, sessions, and route all client traffic
+- Mesh peers forward traffic across server instances
 
 Risks:
-- Gateway becomes attractive target
-- Gateway sees metadata (who talks to whom, how much)
+- Server becomes attractive target
+- Server sees metadata (who connects, hub assignments, traffic volume)
 
 Mitigations:
 - Strong hardening (OS, firewall, minimal services)
-- Strict policy on what they can forward and for whom
-- Robust monitoring and alerting on gateway behavior
+- Strict policy on what hubs allow and for whom
+- Rate limiting (token bucket per identity) to prevent abuse
+- Anti-spoofing on virtual NAT (reject packets with wrong source IP)
+- Robust monitoring and alerting via Prometheus metrics + audit logs
 
-Note: Even gateways **cannot** decrypt end‑to‑end payload beyond what is visible as IP metadata; the QUIC tunnel between endpoints remains encrypted.
+Note: Servers see IP metadata but the QUIC tunnel between client and server provides encryption. For cross-hub traffic via mesh, servers only route PacketBatch payloads.
 
 ---
 
@@ -383,28 +439,30 @@ Mapping back to Chapter 3 personas:
 
 Honest limitations in v0.1:
 
-- No global Sybil resistance for fully public meshes
-- Basic revocation model (policy‑based, not cryptographically enforced at protocol level)
-- No built‑in hardware token support initially (YubiKey, smartcards)
+- No peer-to-peer direct connections (all traffic routes through server)
+- Basic revocation model (policy-based, not cryptographically enforced at protocol level)
+- No built-in hardware token support initially (YubiKey, smartcards)
 
 Planned directions:
 
-- Optional PoA chain for registered nodes in public overlays
+- Direct peer connections via STUN/TURN for reduced latency
 - Stronger identity binding (hardware authenticators)
-- Fine‑grained policy conditions (device posture, geo, time windows)
+- Fine-grained policy conditions (device posture, geo, time windows)
+- ML-KEM-768 hybrid key exchange activation when ecosystem matures
 
 ---
 
 ## Summary
 
-This chapter defined QuicEther’s security model:
+This chapter defined QuicEther's security model (grounded in httpf's implementation):
 
-- **Identity:** Ed25519 keypairs, NodeId derived from public keys
-- **Authentication:** TLS 1.3 mutual auth on all QUIC connections
-- **Authorization:** Zero‑trust, policy‑driven access per NodeId and subnet
-- **Confidentiality:** Encrypted by default, no plaintext mode
-- **Audit:** Structured logs for connections and policy decisions
-- **Operations:** Clear guidance on key management, rotation, and gateways
+- **Identity:** Ed25519 keypairs, NodeId derived via BLAKE3
+- **Authentication:** Three-tier model (Ed25519 + Password/Argon2id + Service Tokens)
+- **Authorization:** Zero-trust with dual engines — Firewall (Proxmox-style ACL) + Policy (per-identity L3/L4)
+- **Confidentiality:** ChaCha20-Poly1305/X25519, encrypted by default, no plaintext mode
+- **Audit:** JSONL structured logs + syslog + Prometheus metrics
+- **Operations:** Clear guidance on key management, rotation, and server hardening
+- **Post-quantum:** ML-KEM-768 readiness
 
 QuicEther aims to be **safe by default**, while remaining flexible enough for small labs and large enterprises alike.
 

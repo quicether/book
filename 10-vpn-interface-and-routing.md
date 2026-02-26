@@ -5,7 +5,7 @@
 This chapter explains how QuicEther integrates with the host networking stack:
 - How the virtual VPN interface works (TUN device)
 - How packets enter and leave the overlay
-- How routing decisions are made (local vs remote vs gateway)
+- How routing decisions are made (local vs server vs bridge vs mesh)
 - How subnet advertisement and forwarding interact
 
 We stay at the L3 (IP) layer; L2 bridging is out of scope for v0.1.
@@ -38,15 +38,21 @@ ip link set quicether0 up
 
 On macOS and Windows, OS-specific APIs create an equivalent TUN.
 
-### 10.1.3 Addressing
+### 10.1.3 Addressing (Hub-Based IP Allocation)
 
-Default addressing model for the overlay:
-- Use CGNAT range `100.64.0.0/10` for point‑to‑point overlay addressing by default
-- For site‑to‑site, use private RFC1918 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+QuicEther uses **hub-based** IP allocation, proven in httpf:
+- Each hub defines a CIDR pool (e.g., `10.100.0.0/24`)
+- Server assigns virtual IPs from the pool when clients connect
+- Anti-spoofing ensures clients only use their assigned IP
+
+Default ranges:
+- Hub networks: private RFC1918 ranges (10.x.y.z/24, 172.16.x.y/24)
+- CGNAT range `100.64.0.0/10` available for overlay point-to-point addressing
+- For site-to-site bridge mode: advertise internal subnets through the hub
 
 Examples:
-- Personal mesh: each node gets `/32` in `100.64.0.0/10`
-- Enterprise: sites advertise internal subnets (10.x.y.z) via QuicEther
+- Personal server: single hub `10.100.0.0/24`, clients get `10.100.0.2-254`
+- Enterprise: multiple hubs per department (`office: 10.100.0.0/24`, `dev: 10.100.1.0/24`)
 
 ---
 
@@ -56,7 +62,7 @@ QuicEther needs to decide, for each IP packet:
 - Is it for **this node**?
 - Is it for a subnet **we own**?
 - Is it for a subnet **another node owns**?
-- Should it go via a **gateway**?
+- Should it go via a **bridge** or **mesh peer**?
 
 ### 10.2.1 Local Routing Table (Overlay View)
 
@@ -64,24 +70,25 @@ Conceptual structure:
 
 ```rust
 struct OverlayRoute {
-    destination: IpNet,      // 10.0.0.0/16
-    next_hop: RouteNextHop,  // Local, NodeId, Gateway
+    destination: IpNet,      // 10.100.0.0/24
+    next_hop: RouteNextHop,  // Local, Server, Bridge
 }
 
 enum RouteNextHop {
-    Local,
-    Node(NodeId),
-    Gateway(NodeId),
+    Local,                    // This hub's subnet
+    Server(SocketAddr),       // Route via QUIC server
+    Bridge(SocketAddr),       // Route via bridge node
+    MeshPeer(String),         // Route via mesh peer server
 }
 
 struct OverlayRoutingTable {
     routes: Vec<OverlayRoute>,
-    default_gateway: Option<NodeId>,
+    default_route: Option<RouteNextHop>,
 }
 ```
 
 Lookup:
-- Longest‑prefix match on `destination`
+- Longest-prefix match on `destination`
 - If multiple routes match, choose most specific
 
 ### 10.2.2 Interaction with OS Routing
@@ -105,36 +112,44 @@ ip route add 10.0.0.0/16 dev quicether0
 ip route add default via 192.168.1.1 dev eth0
 ```
 
-### 10.2.3 Ownership of Subnets
+### 10.2.3 Hub Subnet Ownership
 
-Each node may **advertise** subnets it owns:
-- e.g., `server1` advertises `192.168.1.0/24`
+Subnets are defined per hub in the server configuration:
 
-Advertising has two effects:
-1. Published in DHT (`SUBNET:<CIDR>` record)
-2. Installed in local `OverlayRoutingTable` as `Local` route
+```toml
+[[hubs]]
+name = "office"
+subnet = "10.100.0.0/24"
 
-Other nodes:
-- Query DHT for `SUBNET:<CIDR>`
-- Install route `destination = CIDR, next_hop = Node(owner)`
+[[hubs]]
+name = "factory"
+subnet = "10.100.1.0/24"
+```
+
+Routing effects:
+1. Server installs hub subnets in its routing table as `Local`
+2. Clients receive their hub's subnet info during connection setup
+3. For cross-hub traffic: server routes via internal hub lookup or mesh peer
+4. Bridge mode clients advertise additional LAN subnets through their hub
 
 ---
 
-## 10.3 Packet Flow: End‑to‑End Examples
+## 10.3 Packet Flow: End-to-End Examples
 
 ### 10.3.1 Remote Access (Personal VPN)
 
-Scenario: Sarah’s laptop → home server (192.168.1.10)
+Scenario: Sarah's laptop → home server (192.168.1.10)
 
 1. **Configuration:**
-   - Home node:
+   - Home server:
      ```bash
-     quicether start \
-       --advertise-subnet 192.168.1.0/24
+     quicether server --config server.toml
+     # server.toml defines hub with subnet 192.168.1.0/24
      ```
-   - Sarah’s laptop:
+   - Sarah's laptop:
      ```bash
-     ip route add 192.168.1.0/24 dev quicether0
+     quicether connect --server home.example.com:4433
+     # TUN and routes configured automatically from hub info
      ```
 
 2. **Data Flow:**
@@ -145,101 +160,104 @@ Scenario: Sarah’s laptop → home server (192.168.1.10)
              ↓
    TUN quicether0: QuicEther reads IP packet
              ↓
-   overlay routing: dest 192.168.1.10 ∈ 192.168.1.0/24 → next_hop = Node(home)
+   overlay routing: dest 192.168.1.10 ∈ hub subnet → route via server
              ↓
-   QUIC: send to Node(home)
+   QUIC: send to server
              ↓
    Home node: receives packet, writes to its kernel via TUN
              ↓
-   kernel (home): route to 192.168.1.10 via local LAN
+   kernel (home): route to 192.168.1.10 via local LAN (bridge mode)
              ↓
    home server: receives packet
    ```
 
-### 10.3.2 Site‑to‑Site
+### 10.3.2 Site-to-Site
 
 Scenario: HQ (10.0.0.0/16) ↔ Factory (10.1.0.0/16)
 
 1. **Configuration:**
-   - HQ gateway:
+   - HQ server:
      ```bash
-     quicether start --advertise-subnet 10.0.0.0/16
+     quicether server --config hq-server.toml
+     # Defines hub "hq" with subnet 10.0.0.0/16
      ```
-   - Factory gateway:
+   - Factory server:
      ```bash
-     quicether start --advertise-subnet 10.1.0.0/16
+     quicether server --config factory-server.toml
+     # Defines hub "factory" with subnet 10.1.0.0/16
      ```
-   - On HQ LAN routers/hosts:
-     ```bash
-     # Route 10.1.0.0/16 via HQ gateway (overlay entry)
-     ip route add 10.1.0.0/16 via 10.0.0.1  # HQ gateway IP
+   - Mesh connection between them:
+     ```toml
+     # In hq-server.toml
+     [[mesh.peers]]
+     address = "factory.example.com:4433"
+     service_token = "mesh-secret"
      ```
 
 2. **Data Flow (HQ → Factory):**
    ```text
    host at HQ sends packet to 10.1.0.50
              ↓
-   HQ router: dest 10.1.0.0/16 → next hop = 10.0.0.1 (HQ gateway)
+   HQ router: dest 10.1.0.0/16 → next hop via HQ server overlay
              ↓
-   HQ gateway kernel: sees packet for 10.1.0.50
+   HQ server: sees packet for 10.1.0.50
              ↓
    OS route: 10.1.0.0/16 via quicether0
              ↓
-   TUN → QuicEther → overlay route: 10.1.0.0/16 owned by Node(factory)
+   TUN → QuicEther → overlay route: 10.1.0.0/16 owned by factory hub (via mesh)
              ↓
-   QUIC tunnel to factory
+   QUIC tunnel to factory server (via mesh peer connection)
              ↓
-   factory gateway writes packet to local LAN
+   factory server writes packet to local LAN
    ```
 
 ---
 
-## 10.4 Gateway Behavior (Non‑Relay, Routing Only)
+## 10.4 Bridge Mode (Site-to-Site Forwarding)
 
-Gateways are normal nodes configured to **forward** for specific subnets or nodes.
+In httpf, **bridge mode** was validated as the way to connect on-premise LANs through the overlay. Bridge nodes are clients that also forward traffic for local subnets.
 
 ### 10.4.1 Role Configuration
 
 Example:
 
 ```bash
-# Cloud gateway for Alex’s home subnet
-quicether start \
-  --role gateway \
-  --forward-subnet 192.168.1.0/24
+# Bridge client connecting to cloud server, forwarding local LAN
+quicether bridge \
+  --server vpn.example.com:4433 \
+  --local-subnet 192.168.1.0/24
 ```
 
-Gateway effects:
-- Advertises in DHT that it can forward for that subnet
-- Installs overlay route: `192.168.1.0/24` → `Local` (because it forwards into local LAN or through some path)
+Bridge effects:
+- Connects to server like a normal client
+- Advertises local subnet to the hub
+- Forwards packets between local LAN and the overlay tunnel
+- Other clients in the same hub can reach `192.168.1.0/24` through the bridge
 
-Other nodes lacking direct path to subnet owner:
-- Query DHT for `GW_SUBNET:192.168.1.0/24`
-- Route via gateway NodeId when direct connection fails
+### 10.4.2 Packet Processing at Bridge
 
-### 10.4.2 Packet Processing at Gateway
-
-Gateway receives encapsulated packet destined for some IP not local to the gateway’s own TUN address but within a forwarded subnet.
+Bridge receives encapsulated packet destined for an IP within its advertised local subnet.
 
 Path:
 - QuicEther decapsulates IP packet
-- Checks `OverlayRoutingTable`:
-  - If `dest ∈ forwarded_subnet`:
-    - Writes packet to TUN or appropriate local interface
+- Checks destination against bridge's local subnet:
+  - If `dest ∈ local_subnet`:
+    - Writes packet to local network interface (not TUN)
   - Else:
-    - Forwards via overlay to another node per overlay routing
+    - Sends back to server for routing to correct hub/client
 
 ### 10.4.3 Policy Enforcement
 
-Gateways apply zero‑trust policy as in Chapter 9:
-- Each forwarded packet checked against policy rules
-- If not permitted: drop + log
+Bridge nodes apply the same policy as the server:
+- Each forwarded packet checked against firewall and policy rules
+- Anti-spoofing: verify source IP matches bridge's assigned virtual IP or local subnet
+- If not permitted: drop + log to audit trail
 
 ---
 
 ## 10.5 Routing Algorithms & Conflict Resolution
 
-### 10.5.1 Longest‑Prefix Match
+### 10.5.1 Longest-Prefix Match
 
 When multiple routes could match a destination:
 - Always choose the most specific subnet
@@ -254,43 +272,43 @@ Example:
 
 ### 10.5.2 Route Priority
 
-If there is a **Local** and a **Gateway** route for the same prefix:
+If there is a **Local** and a **MeshPeer** route for the same prefix:
 - Prefer `Local` (direct ownership)
 
-If there is a **Node** and a **Gateway** route:
-- Prefer `Node` (direct connection) when possible
+If there is a **Server** and a **Bridge** route:
+- Prefer `Server` (direct connection) when possible
 
-This aligns with Principle 3 (Direct Connection is Sacred).
+This aligns with Principle 3 (Direct Connection When Possible).
 
-### 10.5.3 Default Gateway in Overlay
+### 10.5.3 Default Route in Overlay
 
-Some nodes may set a default overlay gateway for unknown subnets:
+Some nodes may set a default overlay route for unknown subnets:
 
 ```toml
-[overlay]
-default_gateway = "node_datacenter_gateway"
+[routing]
+default_route = "server"  # or specific mesh peer
 ```
 
 Effects:
-- Packets whose destination does not match any specific overlay route go to this gateway
+- Packets whose destination does not match any specific overlay route go to the server
 - Typical for:
-  - Priya’s desktop (all internet traffic through cloud gateway)
-  - Remote workers sending all corp‑bound traffic via HQ gateway
+  - Priya's desktop (all internet traffic through server)
+  - Remote workers sending all corp traffic via company server
 
 ---
 
 ## 10.6 Interaction with NAT & Local Networks
 
-### 10.6.1 Host‑Only Mode vs Router Mode
+### 10.6.1 Client Mode vs Bridge Mode
 
 Nodes may operate in two broad modes:
 
-1. **Host‑Only:**
+1. **Client (Host-Only):**
    - Only traffic originating from the host uses QuicEther
    - OS routing table directs specific prefixes to `quicether0`
 
-2. **Router/Gateway:**
-   - Node forwards traffic for other machines (acts as router)
+2. **Bridge (Router):**
+   - Node forwards traffic for local LAN machines
    - IP forwarding enabled in OS
    - OS routes from LAN interfaces into `quicether0`
 
@@ -300,10 +318,10 @@ Example enabling Linux forwarding:
 echo 1 > /proc/sys/net/ipv4/ip_forward
 ```
 
-### 10.6.2 NAT on Edge Gateways
+### 10.6.2 NAT on Edge Servers
 
-For internet access via QuicEther gateway:
-- Gateway may perform NAT between overlay addresses and public IP
+For internet access via QuicEther server:
+- Server may perform NAT between overlay addresses and public IP
 
 Example (Linux iptables/nftables):
 
@@ -323,36 +341,35 @@ This is **outside** QuicEther; we leverage existing OS firewall/NAT tools.
 - Only routes specific subnets (home, office) through QuicEther
 
 ```bash
-quicether start
-ip route add 192.168.1.0/24 dev quicether0   # home
+quicether connect --server home.example.com:4433
+# Routes configured automatically from hub info
+# Or manually add additional routes:
 ip route add 10.0.0.0/16 dev quicether0      # office
 ```
 
-### 10.7.2 Always‑On Gateway (Home)
+### 10.7.2 Always-On Server (Home)
 
 ```bash
-# QuicEther gateway on home server
-quicether start \
-  --advertise-subnet 192.168.1.0/24 \
-  --role gateway
-
-# Home router: route overlay addresses to gateway
-ip route add 100.64.0.0/10 via 192.168.1.10  # gateway IP
+# QuicEther server on home server
+quicether server --config server.toml
+# server.toml defines hub with subnet and bridge support
 ```
 
-### 10.7.3 Split‑Tunnel vs Full‑Tunnel
+### 10.7.3 Split-Tunnel vs Full-Tunnel
 
-- **Split‑Tunnel:** Only corporate/homelab subnets go through overlay
-- **Full‑Tunnel:** All traffic goes through overlay gateway
+- **Split-Tunnel:** Only corporate/homelab subnets go through overlay (default)
+- **Full-Tunnel:** All traffic goes through overlay server
 
-Full‑tunnel example (remote worker):
+```toml
+# Full-tunnel configuration
+[client]
+server = "vpn.example.com:4433"
+full_tunnel = true
 
-```bash
-# Route everything through QuicEther
-ip route add default dev quicether0
-
-# Exceptions (local LAN, captive portal, etc.)
-ip route add 192.168.0.0/16 via 192.168.1.1 dev wlan0
+# Split-tunnel with specific routes
+[client]
+server = "vpn.example.com:4433"
+routes = ["10.0.0.0/8", "192.168.1.0/24"]
 ```
 
 ---
@@ -361,12 +378,12 @@ ip route add 192.168.0.0/16 via 192.168.1.1 dev wlan0
 
 ### 10.8.1 Packet Processing Path
 
-We must keep per‑packet overhead minimal:
+We must keep per-packet overhead minimal:
 - Avoid unnecessary copies between TUN buffer and QUIC
 - Batch packets when possible
 
 Implementation hints:
-- Pre‑allocated buffers for TUN reads
+- Pre-allocated buffers for TUN reads
 - Reuse encapsulation headers
 - Use async I/O with bounded task queues
 
@@ -374,7 +391,7 @@ Implementation hints:
 
 For large deployments:
 - Many subnets may be advertised
-- Per‑node route table must still be efficient
+- Per-node route table must still be efficient
 
 Approaches:
 - Use prefix tree (radix/patricia trie) for O(log N) lookups
@@ -383,12 +400,14 @@ Approaches:
 ### 10.8.3 Control vs Data Separation
 
 Overlay routing table is configured by:
-- DHT results
+- Server hub configuration
+- Mesh peer route advertisements
+- Bridge node subnet announcements
 - Static overrides from config
 - Policy engine (may inject denies or exceptions)
 
 Data plane should avoid heavy locks on the routing table:
-- Use read‑optimized structures (e.g., RCU, lock‑free tries) where appropriate
+- Use read-optimized structures (e.g., RCU, lock-free tries) where appropriate
 
 ---
 
@@ -396,18 +415,19 @@ Data plane should avoid heavy locks on the routing table:
 
 In this chapter we:
 - Described how QuicEther uses a TUN interface (`quicether0`) to integrate with OS networking
-- Defined the overlay routing model (local, node, gateway, default)
-- Walked through end‑to‑end packet flows for personal VPN and site‑to‑site
-- Clarified the role of gateways as **routing** nodes (not opaque relays)
+- Defined the hub-based IP allocation model with CIDR pools and anti-spoofing
+- Defined the overlay routing model (local, server, bridge, mesh peer)
+- Walked through end-to-end packet flows for personal VPN and site-to-site via mesh
+- Clarified **bridge mode** for forwarding local LAN subnets through the overlay
 - Covered routing decisions, conflict resolution, NAT interaction, and configuration patterns
 
 This completes the core data plane story: from packets on the host, through QuicEther, across QUIC, and back into remote networks.
 
-**Next Chapter:** We will move up to the **daemon architecture & CLI/API design**, explaining how users and operators interact with QuicEther day‑to‑day.
+**Next Chapter:** We will move up to the **daemon architecture & CLI/API design**, explaining how users and operators interact with QuicEther day-to-day.
 
 ---
 
 **Chapter Navigation:**
-- [← Previous: Chapter 9 - Security & Zero‑Trust](./09-security-and-zero-trust.md)
+- [← Previous: Chapter 9 - Security & Zero-Trust](./09-security-and-zero-trust.md)
 - [↑ Table of Contents](./README.md)
 - [→ Next: Chapter 11 - Daemon & CLI Architecture](./11-daemon-and-cli.md)

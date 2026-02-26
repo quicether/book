@@ -5,367 +5,892 @@
 This chapter is a **reference** for QuicEther configuration.
 
 It documents:
-- Top‑level config structure
+- Server config (`server.toml`) and client config (`client.toml`)
 - All major sections and keys
 - Types, defaults, and examples
 
-This is not a tutorial; see previous chapters for narrative examples. This is the place you consult when you wonder: *“What does `multipath.mode` do?”*
+> **httpf validation:** This configuration model is directly ported from HTTP Fabric's
+> production-tested config system. The two-file split (server vs client), hub-based
+> multi-tenancy, three-tier auth, firewall rules, and audit logging are all proven
+> patterns. QuicEther replaces HTTP/WebSocket transport with native QUIC but keeps
+> the same config structure.
+
+This is not a tutorial; see previous chapters for narrative examples. This is the place you consult when you wonder: *"What does `performance.profile` do?"*
 
 ---
 
 ## 15.1 Config Files & Locations
 
-### 15.1.1 Default Search Paths
+### 15.1.1 Two-File Model
 
-QuicEther looks for a config file in the following order:
+QuicEther uses separate config files for server and client roles:
 
-1. Path specified via CLI flag:
-   ```bash
-   quicether start --config /path/to/config.toml
-   ```
-2. Environment variable:
-   - `QUICETHER_CONFIG=/path/to/config.toml`
-3. OS‑specific defaults:
-   - Linux: `/etc/quicether/config.toml`, then `~/.config/quicether/config.toml`
-   - macOS: `/usr/local/etc/quicether/config.toml`, then `~/Library/Application Support/QuicEther/config.toml`
-   - Windows: `%ProgramData%\QuicEther\config.toml`, then `%APPDATA%\QuicEther\config.toml`
+| Role | Default File | Purpose |
+|------|-------------|---------|
+| Server | `server.toml` | Listener, hubs, auth, mesh, firewall, audit |
+| Client | `client.toml` | Connection, auth, routing, performance |
+| Bridge | `client.toml` | Same as client + `[bridge]` section |
 
-### 15.1.2 Format
+### 15.1.2 Default Search Paths
+
+**Server** looks for `server.toml` in:
+
+1. CLI flag: `quicether server --config /path/to/server.toml`
+2. Environment: `QUICETHER_CONFIG=/path/to/server.toml`
+3. OS defaults:
+   - Linux: `/etc/quicether/server.toml`
+   - macOS: `/usr/local/etc/quicether/server.toml`
+   - Windows: `%ProgramData%\QuicEther\server.toml`
+
+**Client** looks for `client.toml` in:
+
+1. CLI flag: `quicether connect --config /path/to/client.toml`
+2. Environment: `QUICETHER_CONFIG=/path/to/client.toml`
+3. OS defaults:
+   - Linux: `~/.config/quicether/client.toml`, then `/etc/quicether/client.toml`
+   - macOS: `~/Library/Application Support/QuicEther/client.toml`
+   - Windows: `%APPDATA%\QuicEther\client.toml`
+
+### 15.1.3 Format
 
 - TOML is the primary format for configuration files.
 - All examples below use TOML.
 
 ---
 
-## 15.2 Top‑Level Structure
+## 15.2 Server Config: Top-Level Structure
 
 ```toml
-[node]
-# Identity and role
+[server]
+# Listener and admin settings
+
+[[hubs]]
+# Hub (network) definitions — one or more
+
+[auth]
+# Server-side authentication backends
+
+[mesh]
+# Multi-server mesh clustering
+
+[logging]
+# Log level and format
+
+[audit]
+# Audit log settings and syslog forwarding
+```
+
+---
+
+## 15.3 Client Config: Top-Level Structure
+
+```toml
+[server]
+# Connection target (host, port, hub)
+
+[auth]
+# Client authentication method
 
 [network]
-# TUN interface, overlay addresses, subnets
-
-[discovery]
-# DHT and bootstrap settings
-
-[multipath]
-# Multi‑interface and scheduling
-
-[security]
-# Policy, keys, audit logging
-
-[monitoring]
-# Metrics and health endpoints
-
-[overlay]
-# Overlay routing defaults (optional)
+# TUN device, MTU, encryption, multipath
 
 [performance]
-# Advanced tuning (optional)
+# Batching profile and tuning
+
+[routing]
+# Split tunnel, full tunnel, route rules
+
+[reconnect]
+# Auto-reconnect behavior
+
+[bridge]
+# Bridge mode (optional — advertise LAN subnets)
+
+[proxy]
+# Client-side proxy (optional — tunnel through SOCKS5/HTTP)
+
+[logging]
+# Log level and format
 ```
 
 ---
 
-## 15.3 `[node]` Section
+## 15.4 Server: `[server]` Section
 
-Controls node identity and high‑level behavior.
+Controls the QUIC listener and admin API.
 
 ```toml
-[node]
-name = "hq-gateway"       # Human‑friendly name (string)
-role = "standard"          # "standard" | "gateway" | "enterprise"
-key_file = "/var/lib/quicether/node.key"  # Path to private key (string, optional)
+[server]
+listen_address = "0.0.0.0"          # Bind address (string, default "0.0.0.0")
+port = 4433                          # QUIC port (integer, default 4433)
+public_url = "quic://vpn.example.com:4433"  # External URL (string, optional)
+
+# TLS (required for QUIC — uses TLS 1.3 built into QUIC)
+[server.tls]
+certificate_path = "/etc/quicether/server.crt"
+private_key_path = "/etc/quicether/server.key"
+
+# Admin API (optional — separate port for management)
+admin_api_key = "my-secret-key"      # API key for admin endpoints (string, optional)
+admin_port = 9090                    # Separate admin port (integer, optional)
+admin_listen = "127.0.0.1"          # Admin bind address (default "127.0.0.1")
 ```
 
-- `name` (string, optional):
-  - Used in logs and CLI outputs.
-  - Does **not** affect NodeId (which is derived from key).
+- `listen_address` (string):
+  - Default: `"0.0.0.0"`.
+  - Bind address for the QUIC listener.
 
-- `role` (string, optional):
-  - `"standard"` (default): Regular node.
-  - `"gateway"`: Node may forward for others; enables extra config in `[network]` / `[overlay]`.
-  - `"enterprise"`: Same as gateway + enables enterprise defaults (stricter policy, audit on).
+- `port` (integer):
+  - Default: `4433`.
+  - UDP port for QUIC connections.
 
-- `key_file` (string, optional):
-  - Path to Ed25519 private key.
-  - If omitted, QuicEther may generate and store one in a default location on first start.
+- `public_url` (string, optional):
+  - External URL where this server is reachable.
+  - Used by mesh peers and for self-identification.
+  - If omitted, derived from `listen_address:port`.
+
+- `[server.tls]`:
+  - QUIC mandates TLS 1.3 — this is not optional.
+  - `certificate_path`: Path to TLS certificate (PEM).
+  - `private_key_path`: Path to TLS private key (PEM).
+
+- `admin_api_key` (string, optional):
+  - If set, all `/api/v1/*` and `/admin/*` endpoints require this key.
+
+- `admin_port` (integer, optional):
+  - If set, admin endpoints are served on this port instead of the QUIC port.
+
+- `admin_listen` (string):
+  - Default: `"127.0.0.1"` (localhost only for security).
 
 ---
 
-## 15.4 `[network]` Section
+## 15.5 Server: `[[hubs]]` Section
 
-Defines virtual interface and advertised subnets.
+Defines virtual networks. A server can host multiple hubs for multi-tenancy.
+
+```toml
+[[hubs]]
+name = "default"                     # Hub name (string, required)
+subnet = "10.20.0.0/24"             # IPv4 CIDR for IP allocation (required)
+gateway = "10.20.0.1"               # Gateway IP (default: first IP in subnet)
+session_timeout_secs = 60           # Idle session timeout (default: 60)
+virtual_nat = true                   # Enable DNS + NAT for outbound (default: true)
+
+# IPv6 dual-stack (optional)
+subnet_v6 = "fd00:20::/64"
+gateway_v6 = "fd00:20::1"
+
+# MSS clamping
+mss_clamp = 1360                     # Explicit MSS value (optional)
+mss_clamp_auto = true                # Auto-calc from MTU (default: false)
+
+# Access control (empty = allow all)
+[hubs.access_control]
+allowed_identities = ["hf_abc123"]
+allowed_groups = ["engineering"]
+```
+
+- `name` (string, required):
+  - Unique hub identifier. Clients specify this in `[server].hub`.
+
+- `subnet` (CIDR string, required):
+  - IPv4 pool for client IP assignment.
+  - Example: `"10.20.0.0/24"` provides 253 usable addresses.
+
+- `gateway` (string, optional):
+  - Default: first usable IP in subnet.
+
+- `session_timeout_secs` (integer):
+  - Default: `60`. Sessions idle longer are disconnected.
+
+- `virtual_nat` (bool):
+  - Default: `true`. Server creates TUN device and handles routing/NAT.
+
+- `subnet_v6` / `gateway_v6` (string, optional):
+  - ULA (RFC 4193) addresses for dual-stack IPv6 support.
+
+- `mss_clamp` / `mss_clamp_auto`:
+  - Prevents TCP fragmentation by adjusting MSS in SYN packets.
+
+### 15.5.1 Hub Firewall Rules
+
+Proxmox-style firewall rules evaluated in order (first match wins):
+
+```toml
+[[hubs.firewall]]
+enable = true
+direction = "in"                     # "in" | "out"
+action = "ACCEPT"                    # "ACCEPT" | "DROP" | "REJECT" | "DNAT" | "SNAT"
+protocol = "tcp"                     # "tcp" | "udp" | "icmp" | "all"
+dest_port = 22
+name = "allow-ssh"
+
+# DNAT (port forwarding):
+[[hubs.firewall]]
+enable = true
+direction = "in"
+action = "DNAT"
+protocol = "tcp"
+dest_port = 8080
+forward_ip = "10.20.0.5"
+forward_port = 80
+name = "web-forward"
+
+# SNAT (source NAT / masquerade):
+[[hubs.firewall]]
+enable = true
+direction = "out"
+action = "SNAT"
+protocol = "all"
+masquerade_ip = "10.20.0.1"
+name = "masquerade-outbound"
+```
+
+Rule fields:
+- `enable` (bool): Enable/disable without deletion (default: true)
+- `direction` (string): `"in"` or `"out"`
+- `action` (string): `"ACCEPT"`, `"DROP"`, `"REJECT"`, `"DNAT"`, `"SNAT"`
+- `protocol` (string): `"tcp"`, `"udp"`, `"icmp"`, `"all"`
+- `src_ip` / `dest_ip` (string, optional): CIDR match
+- `src_port` / `dest_port` (integer or range, optional): Port match
+- `forward_ip` / `forward_port` (for DNAT): Internal target
+- `masquerade_ip` (for SNAT): Rewrite source to this IP
+- `name` (string, optional): Human-readable name for logs
+
+### 15.5.2 Hub Routes
+
+Routes pushed to clients:
+
+```toml
+[[hubs.routes]]
+destination = "192.168.0.0/16"       # CIDR network to route
+metric = 100                         # Route priority (lower = preferred)
+```
+
+### 15.5.3 Hub Source-Based Routing
+
+Policy-based routing by source identity or IP:
+
+```toml
+[[hubs.source_routes]]
+source_identity = "admin"
+destination = "0.0.0.0/0"
+gateway = "secure-gw.internal"
+metric = 10
+
+[[hubs.source_routes]]
+source_ip = "10.100.200.0/24"
+destination = "0.0.0.0/0"
+gateway = "guest-gw.internal"
+metric = 50
+```
+
+### 15.5.4 Hub Outbound Proxy
+
+Route egress traffic through an upstream proxy:
+
+```toml
+[hubs.outbound_proxy]
+type = "socks5"                      # "socks5" | "http_connect"
+address = "proxy.example.com:1080"
+username = "user"
+password = "pass"
+proxy_all = true
+exclude = ["10.0.0.0/8", "192.168.0.0/16"]
+health_check_interval_secs = 30
+connect_timeout_secs = 10
+```
+
+### 15.5.5 Hub Policies
+
+Network policies for L4 firewall and per-identity ACLs:
+
+```toml
+[[hubs.policies]]
+name = "restrict-guests"
+src_identity = "guest-*"
+dst_port = 22
+action = "deny"
+```
+
+---
+
+## 15.6 Server: `[auth]` Section
+
+Three-tier authentication backends.
+
+### 15.6.1 Identity Auth (Ed25519)
+
+Identity authentication is always available (no config needed). Clients present
+Ed25519 public keys; servers track them by BLAKE3-derived identity IDs.
+
+### 15.6.2 Local Password Auth
+
+```toml
+[auth.local]
+enabled = true
+hash_algorithm = "argon2id"          # "argon2id" | "bcrypt" | "sha256"
+max_failed_attempts = 5              # Lockout after N failures (0 = no lockout)
+lockout_duration_secs = 900          # 15 minutes lockout
+user_file = "/etc/quicether/users.toml"  # External user database (optional)
+
+# Or inline users:
+[[auth.local.users]]
+username = "alice"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+allowed_hubs = ["default"]
+display_name = "Alice"
+email = "alice@example.com"
+disabled = false
+```
+
+- `enabled` (bool): Enable local password auth (default: false)
+- `hash_algorithm` (string): Default `"argon2id"` (recommended)
+- `max_failed_attempts` (integer): Lockout threshold (default: 5, 0 = disabled)
+- `lockout_duration_secs` (integer): Lockout duration (default: 900)
+- `user_file` (string, optional): Path to external user database
+- `users` (array, optional): Inline user definitions
+
+User fields:
+- `username` (string, required)
+- `password_hash` (string, required): Pre-hashed password
+- `allowed_hubs` (array of strings): Restrict to specific hubs (empty = all)
+- `disabled` (bool): Disable without deletion
+- `display_name` / `email` (optional metadata)
+
+### 15.6.3 Service Token Auth
+
+```toml
+[auth.service_token]
+enabled = true
+
+[[auth.service_token.tokens]]
+name = "site-b-gateway"
+token_hash = "sha256:a1b2c3..."      # echo -n "mytoken" | sha256sum
+allowed_hubs = ["datacenter"]
+expires = "2027-01-01T00:00:00Z"     # ISO 8601 (optional, empty = no expiry)
+max_sessions = 1                     # Concurrent session limit (optional)
+disabled = false
+identity_id = "site-b"              # Override identity (optional)
+```
+
+- `enabled` (bool): Enable service token auth (default: false)
+- `tokens` (array): Defined service tokens
+
+Token fields:
+- `name` (string, required): Human-readable name for audit logs
+- `token_hash` (string, required): SHA-256 hash of the raw token (hex-encoded)
+- `allowed_hubs` (array of strings): Restrict to specific hubs
+- `expires` (string, optional): ISO 8601 expiration timestamp
+- `max_sessions` (integer, optional): Max concurrent sessions
+- `disabled` (bool): Revoke without deletion
+- `identity_id` (string, optional): Override auto-derived identity
+
+---
+
+## 15.7 Server: `[mesh]` Section
+
+Multi-server mesh clustering for geographic distribution.
+
+```toml
+[mesh]
+enabled = true
+
+[[mesh.peers]]
+url = "quic://node-2.example.com:4433"
+subnet = "10.20.2.0/24"
+token = "mesh-secret-token"
+
+[[mesh.peers]]
+url = "quic://node-3.example.com:4433"
+subnet = "10.20.3.0/24"
+token = "mesh-secret-token"
+```
+
+- `enabled` (bool): Enable mesh mode (default: false)
+- `peers` (array): List of mesh peer definitions
+
+Peer fields:
+- `url` (string, required): QUIC URL of the peer server
+- `subnet` (string, required): CIDR subnet that peer owns
+- `token` (string, required): Shared authentication token
+
+> The `node_id` is derived automatically from `[server].public_url` hostname
+> or the machine hostname if not set.
+
+---
+
+## 15.8 Server: `[audit]` Section
+
+Audit logging for security events.
+
+```toml
+[audit]
+enabled = true                       # Enable audit logging (default: true)
+max_entries = 10000                  # In-memory ring buffer size
+file = "/var/log/quicether/audit.log"  # Persist to file (optional)
+format = "json"                      # "json" (JSONL) | "text" (human-readable)
+
+# Forward to syslog (optional):
+[audit.syslog]
+address = "127.0.0.1:514"           # Syslog server (UDP or unix:///dev/log)
+facility = "local0"
+app_name = "quicether"
+rfc5424 = true                       # RFC 5424 format (default: true)
+```
+
+- `enabled` (bool): Default `true`.
+- `max_entries` (integer): In-memory buffer size (default: 10000).
+- `file` (string, optional): Path for JSONL audit log file.
+- `format` (string): `"json"` (default) or `"text"`.
+- `[audit.syslog]` (optional): Forward to syslog server.
+
+---
+
+## 15.9 Server: `[logging]` Section
+
+```toml
+[logging]
+level = "info"                       # "trace" | "debug" | "info" | "warn" | "error"
+format = "pretty"                    # "pretty" (human-readable) | "json" (structured)
+```
+
+- `level` (string): Minimum log level (default: `"info"`)
+- `format` (string): Output format (default: `"pretty"`)
+
+---
+
+## 15.10 Client: `[server]` Section
+
+Specifies the server to connect to.
+
+```toml
+[server]
+host = "vpn.example.com"            # Server hostname or IP (string, required)
+port = 4433                          # QUIC port (integer, default 4433)
+hub = "default"                      # Hub to join (string, default "default")
+```
+
+- `host` (string, required): Server hostname or IP address.
+- `port` (integer): Default `4433`.
+- `hub` (string): Hub name on the server (default: `"default"`).
+
+> **QUIC difference from httpf:** No `tls` boolean needed — QUIC mandates TLS 1.3.
+> Certificate verification is always on by default.
+
+---
+
+## 15.11 Client: `[auth]` Section
+
+Client authentication method. Exactly one method is configured.
+
+### 15.11.1 Identity Auth (Default)
+
+```toml
+[auth]
+method = "identity"
+private_key_path = "identity.key"    # Ed25519 private key file
+```
+
+Generate a keypair:
+```bash
+quicether identity generate -o identity.key
+```
+
+### 15.11.2 Password Auth
+
+```toml
+[auth]
+method = "password"
+username = "alice"
+password = "secret"
+```
+
+> For non-interactive use, set `QUICETHER_PASSWORD` environment variable
+> instead of putting passwords in config files.
+
+---
+
+## 15.12 Client: `[network]` Section
+
+TUN device, encryption, and multipath settings.
 
 ```toml
 [network]
-tun_name = "quicether0"           # Name of TUN device (string)
-tun_addr = "100.64.0.10/16"       # CIDR address on overlay (string)
-advertise_subnets = [              # Subnets this node owns (array of CIDR strings)
-  "192.168.1.0/24"
-]
-mtu = 1420                         # MTU for TUN device (integer, optional)
+mtu = 1400                           # TUN device MTU (576-9000, default 1400)
+encryption = true                    # Data-plane ChaCha20-Poly1305 (default true)
+max_connections = 1                  # Parallel QUIC connections (1-32, default 1)
 ```
 
-- `tun_name` (string):
-  - Default: `"quicether0"`.
+- `mtu` (integer):
+  - Default: `1400`.
+  - QUIC MTU calculation: physical(1500) - UDP/IP(28) - QUIC overhead(~42) - margin(~30) = 1400.
+  - Valid range: 576 (minimum IPv4) to 9000 (jumbo frames).
 
-- `tun_addr` (CIDR string):
-  - Required.
-  - Example: `"100.64.0.10/16"`.
-
-- `advertise_subnets` (array of CIDR strings, optional):
-  - Subnets reachable *behind* this node.
-  - Advertised via DHT for other nodes to route to.
-
-- `mtu` (integer, optional):
-  - Default: implementation‑dependent (commonly 1420).
-  - Lower if underlying network has small MTU.
-
----
-
-## 15.5 `[discovery]` Section
-
-Controls DHT and bootstrap behavior.
-
-```toml
-[discovery]
-bootstrap_mode = false           # If true, node acts as bootstrap
-bootstrap_nodes = [              # Addresses of known bootstrap nodes
-  "bootstrap.quicether.org:9000",
-  "198.51.100.10:9000"
-]
-public_ip = "198.51.100.10"     # Public IP/hostname (for bootstrap/gateway)
-dht_port = 9000                  # UDP port for DHT/QUIC (integer)
-```
-
-- `bootstrap_mode` (bool):
-  - If `true`, node expects inbound joins from others and advertises itself as bootstrap.
-
-- `bootstrap_nodes` (array of strings):
-  - Each string is `"host:port"`.
-  - Used to join the DHT at startup.
-
-- `public_ip` (string, optional):
-  - IP or hostname others should use to reach this node.
-  - Particularly relevant for gateways and bootstrap nodes.
-
-- `dht_port` (integer):
-  - Default: 9000.
-  - UDP port for DHT and QUIC endpoint.
-
----
-
-## 15.6 `[multipath]` Section
-
-Configures use of multiple interfaces and scheduling.
-
-```toml
-[multipath]
-enabled = true                    # Enable multipath (bool)
-mode = "aggregate"                # "aggregate" | "failover"
-interfaces = ["eth0", "eth1"]     # Network interfaces to use
-scheduler = "weighted"            # "round_robin" | "weighted" | "latency_aware"
-
-[multipath.weights]
-eth0 = 1.0
-eth1 = 2.0
-
-[multipath.policies]
-interactive_max_rtt_ms = 50       # Prefer low‑RTT paths for small flows
-bulk_min_bandwidth_mbps = 5       # Use all paths for bulk transfers
-```
-
-- `enabled` (bool):
-  - Default: `false` (MVP may start single‑path by default).
-
-- `mode` (string):
-  - `"aggregate"`: Use all active paths simultaneously.
-  - `"failover"`: Use best path; others as standby.
-
-- `interfaces` (array of strings):
-  - Names of OS network interfaces to use.
-
-- `scheduler` (string):
-  - `"round_robin"`: Simple distribution.
-  - `"weighted"`: Based on `[multipath.weights]`.
-  - `"latency_aware"`: Prefer lower RTT where appropriate.
-
-- `[multipath.weights]` (table):
-  - Interface → relative weight (float).
-
-- `[multipath.policies]` (table, optional):
-  - Advanced hints for scheduler; semantics may evolve.
-
----
-
-## 15.7 `[security]` Section
-
-Controls policy engine, audit logging, and potentially key/Pki settings.
-
-```toml
-[security]
-policy_file = "/etc/quicether/policy.toml"   # Path to policy rules
-audit_log = "/var/log/quicether/audit.json" # Where to write audit events
-require_2fa = false                           # Reserved for future (enterprise)
-```
-
-- `policy_file` (string):
-  - If omitted, default allow/deny policy may apply (implementation‑defined, likely conservative).
-
-- `audit_log` (string):
-  - Path to audit log file (JSON lines).
-
-- `require_2fa` (bool):
-  - Placeholder for future support of MFA/2FA flows.
-
-Policy file format is described in Chapter 9; briefly:
-
-```toml
-[[rules]]
-subject = "node_sarah_laptop"   # NodeId or alias
-object = "10.0.0.0/16"           # CIDR
-action = "allow"                 # "allow" | "deny"
-```
-
----
-
-## 15.8 `[monitoring]` Section
-
-Controls metrics and health endpoints.
-
-```toml
-[monitoring]
-metrics_addr = "127.0.0.1:9090"     # Prometheus metrics (http)
-health_addr = "127.0.0.1:9091"      # Health endpoint (http)
-log_level = "info"                  # "error" | "warn" | "info" | "debug" | "trace"
-```
-
-- `metrics_addr` (string):
-  - If unset, metrics endpoint may be disabled.
-
-- `health_addr` (string):
-  - If unset, health endpoint may be disabled.
-
-- `log_level` (string):
-  - Global minimum log level.
-
----
-
-## 15.9 `[overlay]` Section (Optional)
-
-Provides overlay routing defaults and gateway behavior.
-
-```toml
-[overlay]
-default_gateway = "node_datacenter_gateway"  # NodeId or alias
-```
-
-- `default_gateway` (string, optional):
-  - Used when no specific overlay route matches.
-  - Common in full‑tunnel setups.
-
-Additional keys may include:
-- Static overlay routes
-- Per‑subnet preferences
-
----
-
-## 15.10 `[performance]` Section (Advanced)
-
-Tuning knobs for advanced deployments.
-
-```toml
-[performance]
-io_backend = "auto"           # "auto" | "io_uring" | "standard"
-cpu_affinity = [0, 1, 2, 3]    # Pin I/O threads to specific CPUs
-max_connections = 10000        # Safety cap
-```
-
-- `io_backend` (string):
-  - `"auto"` (default): Choose best available.
-  - `"io_uring"`: Use Linux io_uring explicitly.
-  - `"standard"`: Use portable async I/O.
-
-- `cpu_affinity` (array of integers, optional):
-  - Pin critical threads to specific cores.
+- `encryption` (bool):
+  - Default: `true`.
+  - ChaCha20-Poly1305 AEAD with X25519 key exchange, layered on QUIC's TLS 1.3.
 
 - `max_connections` (integer):
-  - Hard cap on concurrent connections to avoid OOM.
+  - Default: `1` (single full-duplex connection).
+  - `2+`: Parallel QUIC connections for throughput and resilience.
+  - Clamped to range 1-32.
+
+### 15.12.1 Multipath
+
+```toml
+[network.multipath]
+mode = "failover"                    # "disabled" | "failover" | "redundant" | "split"
+interfaces = ["en0", "pdp_ip0"]      # Network interfaces (empty = auto-detect)
+probe_interval_ms = 1000             # Path probe interval (default: 1000)
+path_timeout_ms = 5000               # Mark path unhealthy after (default: 5000)
+dedup_window = 256                   # Dedup sequence window (default: 256)
+```
+
+Modes:
+- `"disabled"` (default): Single path only.
+- `"failover"`: Use best path; switch on failure. No data duplication.
+- `"redundant"`: Send on all paths for maximum reliability.
+- `"split"`: Round-robin distribution for aggregated bandwidth.
+
+> **QUIC advantage:** Native QUIC connection migration (RFC 9000 §9) provides
+> seamless failover without application-layer reconnection. Combined with
+> multipath QUIC, this replaces httpf's parallel TCP/WebSocket approach.
 
 ---
 
-## 15.11 Environment Variables
+## 15.13 Client: `[performance]` Section
+
+Batching profiles for different workloads.
+
+```toml
+[performance]
+profile = "balanced"                 # "latency" | "balanced" | "throughput" | "maxperformance"
+```
+
+Profile defaults:
+
+| Setting | latency | balanced | throughput | maxperformance |
+|---------|---------|----------|------------|----------------|
+| `max_batch_size` | 4 | 16 | 128 | 256 |
+| `max_batch_bytes` | 4KB | 16KB | 128KB | 512KB |
+| `timeout_ms` | 1 | 2 | 10 | 20 |
+| `immediate_flush` | icmp,arp,dhcp | icmp,dhcp | (none) | (none) |
+
+Override individual settings:
+
+```toml
+[performance]
+profile = "balanced"
+max_batch_size = 32                  # Override profile default
+max_batch_bytes = 32768
+timeout_ms = 3
+immediate_flush = ["icmp"]
+```
+
+- `profile` (string):
+  - `"latency"`: VoIP, gaming, interactive — minimize delay.
+  - `"balanced"` (default): General use — reasonable latency and throughput.
+  - `"throughput"`: Bulk transfers, streaming — maximize bandwidth.
+  - `"maxperformance"`: Benchmarks — very large batches, aggressive buffering.
+
+- `max_batch_size` (integer, optional): Override profile packet limit.
+- `max_batch_bytes` (integer, optional): Override profile byte limit.
+- `timeout_ms` (integer, optional): Override profile batch timeout.
+- `immediate_flush` (array of strings, optional): Packet types to flush immediately.
+
+---
+
+## 15.14 Client: `[routing]` Section
+
+Split and full tunnel configuration.
+
+```toml
+[routing]
+route_all_traffic = false            # Full tunnel (0.0.0.0/0 + ::/0)
+accept_pushed_routes = true          # Honor server-pushed routes (default: true)
+
+# Split tunnel — IPv4:
+include_ipv4 = ["10.0.0.0/8", "172.16.0.0/12"]
+exclude_ipv4 = ["192.168.1.0/24"]
+
+# Split tunnel — IPv6:
+include_ipv6 = ["fd00::/8"]
+exclude_ipv6 = ["fe80::/10"]
+```
+
+Route evaluation order:
+1. Server-pushed routes (if `accept_pushed_routes = true`)
+2. `exclude_*` rules checked first (take precedence)
+3. `include_*` rules checked
+4. If `route_all_traffic = true`, default routes added
+
+- `route_all_traffic` (bool): Default `false`. When `true`, adds `0.0.0.0/0` and `::/0`.
+- `accept_pushed_routes` (bool): Default `true`. Honor routes from `[[hubs.routes]]`.
+- `include_ipv4` / `include_ipv6` (arrays): Subnets to route through VPN.
+- `exclude_ipv4` / `exclude_ipv6` (arrays): Subnets to bypass (direct).
+
+---
+
+## 15.15 Client: `[reconnect]` Section
+
+Auto-reconnect behavior on connection loss.
+
+```toml
+[reconnect]
+enabled = true                       # Auto-reconnect (default: true)
+max_attempts = 0                     # 0 = unlimited retries
+min_backoff_ms = 1000                # Initial retry delay
+max_backoff_ms = 60000               # Maximum retry delay (exponential backoff)
+```
+
+- `enabled` (bool): Default `true`.
+- `max_attempts` (integer): Default `0` (unlimited).
+- `min_backoff_ms` / `max_backoff_ms` (integer): Exponential backoff bounds.
+
+---
+
+## 15.16 Client: `[bridge]` Section (Optional)
+
+Bridge mode — advertise local LAN subnets to other VPN clients.
+
+```toml
+[bridge]
+lan_subnets = ["192.168.1.0/24"]
+```
+
+Start in bridge mode:
+```bash
+quicether bridge --config client.toml
+```
+
+- `lan_subnets` (array of CIDR strings): Local networks to advertise.
+
+---
+
+## 15.17 Client: `[proxy]` Section (Optional)
+
+Tunnel the QUIC connection through an upstream proxy.
+
+```toml
+[proxy]
+type = "socks5"                      # "socks5" | "http_connect"
+address = "127.0.0.1:1080"
+username = "user"
+password = "pass"
+```
+
+- `type` (string): `"socks5"` (RFC 1928) or `"http_connect"` (RFC 7231).
+- `address` (string): Proxy server `host:port`.
+- `username` / `password` (string, optional): Proxy authentication.
+
+> **Note:** QUIC over SOCKS5 uses UDP ASSOCIATE. HTTP CONNECT proxies tunnel
+> QUIC-over-TCP as a fallback.
+
+---
+
+## 15.18 Client: `[logging]` Section
+
+Same format as server logging:
+
+```toml
+[logging]
+level = "info"                       # "trace" | "debug" | "info" | "warn" | "error"
+format = "pretty"                    # "pretty" | "json"
+```
+
+---
+
+## 15.19 Environment Variables
 
 Environment variables override config for quick changes or secrets.
 
-Examples:
+**Server:**
+- `QUICETHER_CONFIG` — config file path
+- `QUICETHER_LOG_LEVEL` — override `[logging].level`
+- `QUICETHER_ADMIN_API_KEY` — override `[server].admin_api_key`
 
-- `QUICETHER_CONFIG=/path/to/config.toml`
-- `QUICETHER_LOG_LEVEL=debug`
-- `QUICETHER_METRICS_ADDR=0.0.0.0:9090`
+**Client:**
+- `QUICETHER_CONFIG` — config file path
+- `QUICETHER_LOG_LEVEL` — override `[logging].level`
+- `QUICETHER_PASSWORD` — password for `method = "password"` auth (avoids plaintext in config)
 
-Mapping rules (typical):
-- `QUICETHER_SECTION_KEY` → `[section].key`
-  - e.g., `QUICETHER_NETWORK_TUN_NAME=qe0` → `[network].tun_name = "qe0"`
-
-Exact mapping will be documented in CLI help once implemented.
+Mapping convention:
+- `QUICETHER_SECTION_KEY` maps to `[section].key`
+- Example: `QUICETHER_SERVER_PORT=4433` maps to `[server].port = 4433`
 
 ---
 
-## 15.12 CLI Flags
+## 15.20 CLI Flags
 
-CLI flags override both config and environment vars.
+CLI flags override both config and environment variables.
 
-Selected examples:
-
+**Server:**
 ```bash
-quicether start \
-  --config /etc/quicether/hq.toml \
+quicether server \
+  --config /etc/quicether/server.toml \
   --log-level debug \
-  --tun-name qe0 \
-  --metrics-addr 0.0.0.0:9090
+  --port 4433 \
+  --admin-port 9090
 ```
 
-Conceptual mapping:
-- `--config` → config file path
-- `--log-level` → `[monitoring].log_level`
-- `--tun-name` → `[network].tun_name`
-- `--metrics-addr` → `[monitoring].metrics_addr`
+**Client:**
+```bash
+quicether connect \
+  --config /etc/quicether/client.toml \
+  --server vpn.example.com \
+  --port 4433 \
+  --hub default \
+  --log-level debug
+```
 
-Full flag list will be kept in `quicether --help` output.
+**Bridge:**
+```bash
+quicether bridge \
+  --config /etc/quicether/client.toml \
+  --lan-subnets 192.168.1.0/24
+```
+
+Full flag list: `quicether server --help`, `quicether connect --help`, `quicether bridge --help`.
 
 ---
 
-## 15.13 Minimal Config Examples
+## 15.21 Minimal Config Examples
 
-### 15.13.1 Minimal Personal Node
+### 15.21.1 Minimal Server
 
 ```toml
-[node]
-name = "laptop"
+[server]
+port = 4433
 
-[network]
-tun_addr = "100.64.0.10/16"
+[server.tls]
+certificate_path = "/etc/quicether/server.crt"
+private_key_path = "/etc/quicether/server.key"
 
-[discovery]
-bootstrap_nodes = ["home-server.example.com:9000"]
+[[hubs]]
+name = "default"
+subnet = "10.20.0.0/24"
 ```
 
-### 15.13.2 Minimal Gateway
+### 15.21.2 Minimal Client (Identity Auth)
 
 ```toml
-[node]
-name = "home-gateway"
-role = "gateway"
+[server]
+host = "vpn.example.com"
+port = 4433
+hub = "default"
 
-[network]
-tun_addr = "100.64.0.1/16"
-advertise_subnets = ["192.168.1.0/24"]
+[auth]
+method = "identity"
+private_key_path = "identity.key"
+```
 
-[discovery]
-bootstrap_mode = true
-public_ip = "203.0.113.5"
+### 15.21.3 Client with Full Tunnel
+
+```toml
+[server]
+host = "vpn.example.com"
+port = 4433
+
+[auth]
+method = "identity"
+private_key_path = "identity.key"
+
+[routing]
+route_all_traffic = true
+```
+
+### 15.21.4 Bridge (Site-to-Site)
+
+```toml
+[server]
+host = "vpn.example.com"
+port = 4433
+
+[auth]
+method = "identity"
+private_key_path = "identity.key"
+
+[bridge]
+lan_subnets = ["192.168.1.0/24"]
+```
+
+### 15.21.5 Multi-Hub Server with Auth
+
+```toml
+[server]
+listen_address = "0.0.0.0"
+port = 4433
+public_url = "quic://vpn.example.com:4433"
+admin_api_key = "change-me-in-production"
+
+[server.tls]
+certificate_path = "/etc/quicether/server.crt"
+private_key_path = "/etc/quicether/server.key"
+
+[[hubs]]
+name = "engineering"
+subnet = "10.20.1.0/24"
+
+[[hubs]]
+name = "guests"
+subnet = "10.20.2.0/24"
+session_timeout_secs = 30
+
+[auth.local]
+enabled = true
+user_file = "/etc/quicether/users.toml"
+
+[auth.service_token]
+enabled = true
+
+[[auth.service_token.tokens]]
+name = "ci-runner"
+token_hash = "sha256:a1b2c3d4..."
+allowed_hubs = ["engineering"]
+
+[audit]
+enabled = true
+file = "/var/log/quicether/audit.log"
+format = "json"
+
+[logging]
+level = "info"
+```
+
+### 15.21.6 Server Mesh (3 Regions)
+
+```toml
+# Region 1: US-East
+[server]
+listen_address = "0.0.0.0"
+port = 4433
+public_url = "quic://us-east.vpn.example.com:4433"
+
+[server.tls]
+certificate_path = "/etc/quicether/server.crt"
+private_key_path = "/etc/quicether/server.key"
+
+[[hubs]]
+name = "default"
+subnet = "10.20.1.0/24"
+
+[mesh]
+enabled = true
+
+[[mesh.peers]]
+url = "quic://eu-west.vpn.example.com:4433"
+subnet = "10.20.2.0/24"
+token = "mesh-secret"
+
+[[mesh.peers]]
+url = "quic://ap-south.vpn.example.com:4433"
+subnet = "10.20.3.0/24"
+token = "mesh-secret"
+
+[logging]
+level = "info"
 ```
 
 ---
@@ -373,17 +898,33 @@ public_ip = "203.0.113.5"
 ## Summary
 
 This chapter provided a **reference** for QuicEther configuration:
-- Sections: `[node]`, `[network]`, `[discovery]`, `[multipath]`, `[security]`, `[monitoring]`, `[overlay]`, `[performance]`
-- Key options, types, and typical defaults
-- How config files, environment variables, and CLI flags interact
 
-For practical examples, see earlier chapters on deployment, operations, and personas.
+**Server config** (`server.toml`):
+- `[server]` — QUIC listener, TLS, admin API
+- `[[hubs]]` — Virtual networks with firewall, routes, source routing, outbound proxy
+- `[auth]` — Three-tier: identity (Ed25519), local passwords (Argon2id), service tokens
+- `[mesh]` — Multi-server clustering with peer URLs and shared tokens
+- `[audit]` — JSONL file + syslog forwarding
+- `[logging]` — Level and format
 
-**Next Chapter:** We will discuss **future directions & extensions**, including optional blockchain integration and advanced schedulers.
+**Client config** (`client.toml`):
+- `[server]` — Connection target (host, port, hub)
+- `[auth]` — Identity keypair or password
+- `[network]` — MTU, encryption, multipath
+- `[performance]` — Batching profiles (latency/balanced/throughput/maxperformance)
+- `[routing]` — Split/full tunnel with IPv4/IPv6 rules
+- `[reconnect]` — Auto-reconnect with exponential backoff
+- `[bridge]` — Optional LAN subnet advertisement
+- `[proxy]` — Optional SOCKS5/HTTP CONNECT upstream proxy
+- `[logging]` — Level and format
+
+Config precedence: CLI flags > environment variables > config file > defaults.
+
+**Next Chapter:** We will discuss **future directions & extensions**, including advanced schedulers and post-quantum cryptography.
 
 ---
 
 **Chapter Navigation:**
 - [← Previous: Chapter 14 - Deployment & Operations](./14-deployment-and-operations.md)
 - [↑ Table of Contents](./README.md)
-- [→ Next: Chapter 16 - Future Directions & Extensions](./16-future-directions.md)
+- [→ Next: Chapter 16 - Future Directions & Extensions](./16-future-directions-and-extensions.md)

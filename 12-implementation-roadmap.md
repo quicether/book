@@ -2,299 +2,308 @@
 
 ## Introduction
 
-This chapter turns the architecture into a **concrete implementation plan**.
+This chapter turns the architecture into a **concrete implementation plan**, informed by the lessons learned building httpf.
+
+Because httpf already validated the core architecture (server mode, hubs, sessions, three-tier auth, firewall, policy, mesh, cascade, bridge mode, audit logging, mobile FFI), QuicEther's roadmap is accelerated. We are not exploring unknown territory — we are rebuilding proven patterns on a superior transport (native QUIC).
 
 We define:
 - Phased milestones (v0.1, v0.2, v0.3, v1.0)
 - Scope of each phase
-- Dependencies between components
-- Non‑goals for early versions
-
-The goal is to **ship something useful early**, then iterate without breaking the core principles.
+- What httpf already proved vs. what's new for QuicEther
+- Non-goals for early versions
 
 ---
 
-## 12.1 Guiding Principles for Delivery
+## 12.1 httpf Validation Summary
 
-- **Vertical slices over horizontal layers:**
-  - Prefer delivering end‑to‑end functionality (even if minimal) rather than building complete subsystems in isolation.
-- **MVP, then iterate:**
-  - v0.1 should already solve at least one real persona’s use case (Sarah/Alex).
+Before planning, let's acknowledge what httpf already proved works:
+
+| Feature | httpf Status | QuicEther Adaptation |
+|---------|-------------|---------------------|
+| Single binary server/client | ✅ Proven | Port to QUIC transport |
+| Hub-based multi-tenancy | ✅ Proven | Direct port |
+| Session management | ✅ Proven | Direct port |
+| Three-tier auth (Ed25519/password/service token) | ✅ Proven | Direct port |
+| Firewall engine (Proxmox-style) | ✅ Proven | Direct port |
+| Policy engine (per-identity L3/L4) | ✅ Proven | Direct port |
+| Virtual NAT + anti-spoofing | ✅ Proven | Direct port |
+| Server mesh | ✅ Proven | Port to QUIC mesh protocol |
+| Cascade routing | ✅ Proven | Direct port |
+| Bridge mode | ✅ Proven | Direct port |
+| Audit logging (JSONL + syslog) | ✅ Proven | Direct port |
+| Mobile FFI (iOS/Android) | ✅ Proven | Direct port |
+| PacketBatch format | ✅ Proven | Direct port |
+| Multipath | ⚠️ Parallel TCP | Native QUIC multipath (new) |
+| 0-RTT reconnection | ❌ Not possible over TCP | Native QUIC feature (new) |
+| Connection migration | ❌ Not possible over TCP | Native QUIC feature (new) |
+| TUN interface | ✅ Proven | Direct port |
+
+**Bottom line:** ~80% of QuicEther is a direct port from httpf. The new work is primarily the QUIC transport layer, native multipath, and connection migration.
+
+---
+
+## 12.2 Guiding Principles for Delivery
+
+- **Port, don't reinvent:**
+  - Start by porting httpf's proven code to QUIC. Don't redesign what already works.
+- **QUIC-first features early:**
+  - Prioritize the features that justify QuicEther's existence over httpf: native multipath, 0-RTT, connection migration.
+- **Ship fast, iterate:**
+  - httpf's architecture is validated. v0.1 can ship with full feature parity minus multipath.
 - **Compatibility discipline:**
-  - Avoid breaking on‑disk formats and network protocols without versioning.
+  - Avoid breaking on-disk formats and network protocols without versioning.
 - **Testability:**
-  - Each milestone must be testable in isolation (unit + integration).
+  - Port httpf's test infrastructure. Each milestone must be testable.
 
 ---
 
-## 12.2 Milestone Overview
+## 12.3 Milestone Overview
 
-### v0.1: "Developer Mesh" (Local + Simple Remote)
+### v0.1: "QUIC Core" (Feature Parity with httpf)
 
-**Goal:** Usable for homelab / developer scenarios on Linux.
+**Goal:** Port httpf's complete feature set from HTTP/WebSocket to native QUIC.
 
-Core capabilities:
-- Single binary `quicether`
-- Linux only (x86_64)
-- TUN interface + basic routing
-- Embedded Kademlia DHT (simplified)
-- QUIC transport (single path, no multipath yet)
-- TLS 1.3 mutual auth with self‑signed certs
-- Basic CLI (`start`, `status`, `peers`, `routes`)
+Core capabilities (all proven in httpf, ported to QUIC):
+- Single binary `quicether` (server/connect/bridge modes)
+- Linux (x86_64) + macOS
+- TUN interface + virtual NAT routing
+- QUIC transport with TLS 1.3 (using `quinn`)
+- Hub-based multi-tenancy with CIDR IP pools
+- Session management
+- Three-tier authentication (Ed25519, password, service token)
+- Firewall engine (Proxmox-style ACL)
+- Policy engine (per-identity L3/L4)
+- PacketBatch encapsulation over QUIC streams
+- Audit logging (JSONL + syslog)
+- CLI: server, connect, bridge, identity, hub, session, password, audit
+- Prometheus metrics endpoint
+- 0-RTT reconnection (new — QUIC native)
 
 Primary personas:
-- Sarah (remote developer)
-- Alex (homelab enthusiast) — without multipath initially
+- Sarah (remote developer) — connect to office server
+- Alex (homelab) — run personal VPN server
+- James (small business) — server with hubs and policy
 
-### v0.2: "Multipath Alpha"
+**Timeline advantage:** httpf code can be directly ported. Transport layer is the only new code.
 
-**Goal:** Introduce working multipath for advanced users.
+### v0.2: "Multipath & Migration"
+
+**Goal:** Deliver QuicEther's core differentiators over httpf.
 
 Additions:
-- Path discovery (multiple interfaces)
-- Basic multipath scheduler (round‑robin or simple weighted)
-- Path monitoring (RTT, loss)
-- Metrics endpoint (Prometheus)
+- Native QUIC multipath (multiple interfaces)
+- Path discovery, monitoring, and scheduling
+- Performance profiles (latency/balanced/throughput/max_performance)
+- Connection migration (WiFi → LTE seamless handoff)
+- Path failure detection and automatic recovery
 
 Primary personas:
-- Alex (homelab) with colo gateway
-- Maria (nomad) at an experimental level
+- Maria (digital nomad) — WiFi + LTE bonding
+- Alex (homelab) — multiple ISP aggregation
 
-### v0.3: "Gateway & Small Business"
+### v0.3: "Server Mesh & Scale"
 
-**Goal:** Make it viable for small office/site‑to‑site setups.
+**Goal:** Multi-server deployments and enterprise features.
 
 Additions:
-- Gateway configuration (`--role gateway`, `--forward-subnet`)
-- Subnet advertisement via DHT
-- Overlay routing table and subnet ownership
-- Basic policy engine (allow/deny by NodeId and subnet)
-- Audit logging to file
+- Server mesh over QUIC (porting httpf's mesh to native QUIC)
+- Cascade routing across mesh peers
+- Cross-hub routing via mesh
+- Rate limiting (token bucket per identity)
+- Advanced firewall (ICMP types, port ranges)
+- Admin API (REST over local socket)
 
 Primary personas:
-- James (small business owner)
+- James (multi-location business)
+- David (enterprise IT)
 
-### v1.0: "Production‑Ready Core"
+### v1.0: "Production-Ready"
 
-**Goal:** Stable, documented, with clear upgrade path.
+**Goal:** Stable, documented, battle-tested.
 
 Additions:
-- Cross‑platform support (Linux, macOS; Windows if feasible)
-- Robust CLI & IPC protocol (versioned)
-- Mature multipath schedulers (weighted, latency‑aware)
-- Hardened security (key management patterns, revocation hooks)
-- Systemd/launchd/Windows service integration docs
+- Windows support (TUN driver + service integration)
+- Mobile SDKs (iOS/Android via FFI — ported from httpf)
+- Hardened security (key rotation, revocation hooks)
+- Performance optimizations (profiling, hot-path tuning)
+- Comprehensive documentation and deployment guides
 
 Primary personas:
-- Sarah, Alex, James, Maria in supported configurations
+- All personas in supported configurations
 
 ---
 
-## 12.3 Detailed Phase Breakdown
+## 12.4 Detailed Phase Breakdown
 
-### 12.3.1 Phase 1: Core Daemon Skeleton (v0.1‑A)
+### 12.4.1 Phase 1: QUIC Transport Core (v0.1-A)
 
-Deliverable: A process that starts, creates TUN, and passes packets to itself (loopback overlay).
-
-Tasks:
-1. Project scaffolding:
-   - Rust workspace, crates for `daemon`, `cli`, `config`, `dht`, `transport`.
-2. Config loading:
-   - Parse minimal TOML config file.
-   - Merge with env + flags.
-3. TUN integration (Linux):
-   - Create `quicether0`.
-   - Read/write raw IPv4 packets.
-4. Local echo path:
-   - Embed minimal router that sends packets back to same node.
-
-Testing:
-- `ping 100.64.0.1` into TUN and see responses.
-
-### 12.3.2 Phase 2: QUIC Transport (v0.1‑B)
-
-Deliverable: Two nodes can establish secure QUIC connection and tunnel packets.
+Deliverable: Two nodes can establish QUIC connection and tunnel IP packets.
 
 Tasks:
-1. Integrate QUIC library (`quinn`/`s2n-quic`).
-2. Implement TLS 1.3 with Ed25519 certificates.
-3. Implement connection manager:
-   - Map NodeId ↔ QUIC connection.
-4. Encapsulate IP packets over QUIC streams.
+1. Port httpf's project structure to QUIC:
+   - Replace `hyper`/`tokio-tungstenite` with `quinn`
+   - Keep all other crates intact
+2. QUIC listener and connector:
+   - Server: `quicether server` listens on UDP port
+   - Client: `quicether connect` connects to server
+3. TLS 1.3 with Ed25519 certificates
+4. PacketBatch over QUIC unidirectional streams
+5. TUN interface (port from httpf)
 
 Testing:
-- Two nodes on LAN, static config (no DHT):
-  - Node A: `quicether start --peer 192.168.1.20:9000`
-  - Node B: `quicether start --listen 0.0.0.0:9000`
-  - Ping across overlay addresses.
+- Server + client on same LAN
+- `ping` across overlay addresses
+- `iperf3` throughput baseline
 
-### 12.3.3 Phase 3: Basic DHT (v0.1‑C)
+### 12.4.2 Phase 2: Hub & Session Management (v0.1-B)
 
-Deliverable: Nodes auto‑discover each other without static peer lists.
+Deliverable: Multi-tenant server with IP allocation, auth, and sessions.
+
+Tasks (all direct ports from httpf):
+1. Hub manager with CIDR IP pools
+2. Session manager (create, track, destroy)
+3. Three-tier auth (Ed25519, password/Argon2id, service token)
+4. Virtual NAT router with anti-spoofing
+5. CLI: `hub`, `session`, `identity`, `password`
+
+Testing:
+- Multiple clients connecting to one server
+- Each gets unique virtual IP
+- Clients can communicate via server
+
+### 12.4.3 Phase 3: Security & Audit (v0.1-C)
+
+Deliverable: Complete security stack.
+
+Tasks (all direct ports from httpf):
+1. Firewall engine (Proxmox-style ACL, first-match)
+2. Policy engine (per-identity L3/L4 rules)
+3. Audit logger (JSONL file + optional syslog)
+4. Prometheus metrics endpoint
+5. 0-RTT reconnection support (QUIC session tickets)
+
+Testing:
+- Verify firewall blocks unauthorized traffic
+- Verify audit logs capture events
+- Verify 0-RTT reconnection works
+
+### 12.4.4 Phase 4: Bridge Mode + v0.1 Release
+
+Deliverable: Packaged v0.1 release with full httpf feature parity.
 
 Tasks:
-1. Implement minimal Kademlia:
-   - NodeId generation
-   - Buckets
-   - `PING`, `FIND_NODE`, `STORE`, `FIND_VALUE` (subset)
-2. Node metadata records only (`NODE:<NodeId>`).
-3. Bootstrap logic using a static list of bootstrap nodes.
-4. Integrate with connection manager:
-   - Given NodeId → DHT lookup → addresses → connect.
-
-Testing:
-- 3+ nodes in network with only bootstrap IPs configured.
-- All can discover and connect to each other without manual IP config.
-
-### 12.3.4 Phase 4: Usable v0.1 Release
-
-Bundle Phases 1–3:
-- Package as v0.1
-- Add CLI commands: `status`, `peers`, `routes` (read‑only at first).
-- Documentation:
-  - Install on Linux
-  - Basic personal VPN setup
+1. Bridge mode (client + local subnet forwarding)
+2. CLI: `bridge`, `audit`, admin commands
+3. Docker image + systemd unit file
+4. Documentation: install guide, server setup, client setup
+5. CI/CD: automated builds and tests
 
 ---
 
-### 12.3.5 Phase 5: Multipath Foundations (v0.2‑A)
+### 12.4.5 Phase 5: Multipath (v0.2)
 
-Deliverable: Multiple interfaces recognized and used, but may default to a simple strategy.
+Deliverable: Working multipath over QUIC.
 
-Tasks:
-1. Interface discovery (enumerate `eth*`, `wlan*`, etc.).
-2. Represent network paths and metrics structures.
-3. Simple scheduler (round‑robin).
-4. Path probing and basic failure detection.
-
-Testing:
-- Node with eth0 + wlan0.
-- Start large file transfer, unplug one interface, see continuity.
-
-### 12.3.6 Phase 6: Multipath Tuning (v0.2‑B)
-
-Deliverable: More efficient multipath with basic configuration.
-
-Tasks:
-1. Weighted scheduler based on bandwidth estimations.
-2. Basic latency‑aware adjustments.
-3. Metrics export for per‑path RTT and throughput.
+Tasks (this is genuinely new — httpf only had parallel TCP):
+1. Interface discovery (enumerate local network interfaces)
+2. Path representation and metrics (RTT, loss, bandwidth)
+3. QUIC multipath extension integration
+4. Scheduler implementations:
+   - Round-robin
+   - Weighted
+   - Latency-aware
+   - Redundant
+5. Performance profiles (latency/balanced/throughput/max_performance)
+6. Connection migration (IP/port change without session loss)
+7. Path failure detection and automatic recovery
 
 Testing:
-- Synthetic lab with controlled link speeds.
-- Validate aggregate throughput approaches sum of links.
+- Dual-interface node (eth0 + wlan0)
+- Bandwidth aggregation verification
+- Interface failover test (unplug cable)
+- Connection migration test (switch WiFi networks)
 
----
+### 12.4.6 Phase 6: Server Mesh (v0.3)
 
-### 12.3.7 Phase 7: Gateway & Subnet Routing (v0.3‑A)
+Deliverable: Multi-server mesh with cross-hub routing.
 
-Deliverable: Site‑to‑site and gateway forwarding.
-
-Tasks:
-1. Subnet advertisement:
-   - `SUBNET:<CIDR>` records in DHT.
-   - Local installation of `Local` routes.
-2. Overlay routing table implementation (longest‑prefix match).
-3. Gateway records:
-   - `GW_SUBNET:<CIDR>` and node‑specific if needed.
-4. Gateway forwarder logic:
-   - Receive → policy check → forward into local subnet or onward.
-
-Testing:
-- Two sites with different 10.x subnets.
-- Verify site‑to‑site via overlay and fallback via gateway when direct fails.
-
-### 12.3.8 Phase 8: Policy & Audit (v0.3‑B)
-
-Deliverable: Zero‑trust basics + logging.
-
-Tasks:
-1. Policy engine (allow/deny by NodeId + subnet).
-2. Minimal policy file parser.
-3. Enforcement hooks in router.
-4. Structured audit logging to file.
+Tasks (port httpf's mesh to QUIC):
+1. Mesh peer connections via QUIC
+2. Hub route advertisement protocol
+3. Cross-hub packet forwarding
+4. Cascade routing (multi-hop)
+5. Service token authentication for mesh peers
+6. Rate limiting (token bucket)
+7. Admin API (REST over local socket)
 
 Testing:
-- Define policies that allow/deny subsets.
-- Verify unauthorized traffic is dropped and logged.
+- 3-node server mesh
+- Client on server A reaches client on server B
+- Verify cascade routing with 3-hop path
 
 ---
 
-### 12.3.9 Phase 9: Hardening for v1.0
+### 12.4.7 Phase 7: Production Hardening (v1.0)
 
 Tasks:
-1. Cross‑platform support:
-   - macOS (TUN, launchd integration).
-   - Optionally Windows (TUN driver, service).
-2. IPC stabilization:
-   - Versioned JSON‑RPC schema.
-   - Backward‑compatible CLI.
-3. Security documentation:
-   - Key management guides.
-   - Recommended policies and deployment patterns.
-4. Performance optimizations:
-   - Benchmark harness (iperf‑like).
-   - Profiling and hot‑path optimizations.
-
-Outcome:
-- v1.0 release suitable for production in controlled environments.
+1. Windows support (TUN driver, named pipe IPC, Windows service)
+2. Mobile FFI (port httpf's iOS/Android bindings to QUIC)
+3. Performance profiling and optimization
+4. Key rotation and revocation patterns
+5. Comprehensive documentation
+6. Security audit
 
 ---
 
-## 12.4 Non‑Goals for Early Versions
+## 12.5 Non-Goals for Early Versions
 
-To avoid scope creep, early versions will **not** include:
+To avoid scope creep:
 
-- Mobile apps (iOS/Android) → planned for post‑v1.0.
-- Web UI dashboard → can be added once IPC is stable.
-- Blockchain/PoA integration → optional, later milestone.
-- Kernel bypass (DPDK/XDP) → performance lab project after core stabilizes.
-- L2 bridging / TAP mode → separate design after L3 is mature.
-
-These are explicitly **later** features.
+- **DHT / P2P discovery** → deferred to v2.0+ (server mesh is sufficient)
+- **Kernel bypass (DPDK/XDP)** → performance lab project after core stabilizes
+- **L2 bridging / TAP mode** → separate design after L3 is mature
+- **Web UI dashboard** → can be added once admin API is stable
+- **Post-quantum crypto activation** → ML-KEM-768 prepared but not enabled until ecosystem matures
 
 ---
 
-## 12.5 Mapping to Personas
+## 12.6 Mapping to Personas
 
-- **After v0.1:**
-  - Sarah can use it for simple remote dev setups (Linux only).
-  - Alex can build a small homelab mesh on Linux.
-
-- **After v0.2:**
-  - Alex can experiment with multipath.
-  - Maria can start using WiFi + LTE bonding (early adopter).
-
-- **After v0.3:**
-  - James can deploy small site‑to‑site networks with gateways and basic policy.
-
-- **After v1.0:**
-  - All core personas can use QuicEther in some supported form, with docs and repeatable patterns.
+| Persona | After v0.1 | After v0.2 | After v0.3 | After v1.0 |
+|---------|-----------|-----------|-----------|-----------|
+| Sarah (developer) | ✅ Full use | ✅ + multipath | ✅ | ✅ |
+| Alex (homelab) | ✅ Full use | ✅ + multi-ISP | ✅ | ✅ |
+| James (small biz) | ✅ Full use | ✅ | ✅ + multi-site | ✅ |
+| Maria (nomad) | ✅ Basic | ✅ Full use | ✅ | ✅ |
+| Priya (rural) | ✅ Basic | ✅ Full use | ✅ | ✅ |
+| David (enterprise) | ⚠️ Eval only | ⚠️ | ✅ Full use | ✅ Production |
 
 ---
 
-## 12.6 Developer Workflow & Tooling
+## 12.7 Developer Workflow & Tooling
 
-Recommended practices for the implementation phase:
+Practices carried forward from httpf:
 
-- Use **Rust nightly only if necessary**; otherwise prefer stable.
-- Enforce `cargo fmt` and `cargo clippy` in CI.
-- Add integration tests under `tests/` that spin up multiple nodes.
-- Use a simple **docker‑compose** file for multi‑node local testing.
-- Maintain example configs in `examples/` matching the book’s scenarios.
+- Use **Rust stable** (no nightly dependency)
+- Enforce `cargo fmt` and `cargo clippy` in CI
+- Integration tests that spin up server + multiple clients
+- Docker Compose for multi-node testing (reuse httpf's CI setup)
+- Benchmark harness using `criterion` (iperf3-equivalent)
+- Example configs in `configs/` matching book scenarios
+- Structured logging with `tracing` crate
 
 ---
 
 ## Summary
 
-This roadmap turns the architecture into a staged delivery plan:
+This roadmap leverages httpf's proven architecture to accelerate delivery:
 
-- v0.1: Core TUN + QUIC + DHT, Linux‑only, developer‑friendly mesh.
-- v0.2: Multipath foundations and tuning.
-- v0.3: Gateways, subnet routing, zero‑trust basics, suitable for small businesses.
-- v1.0: Cross‑platform, hardened, production‑ready core.
+- **v0.1:** Port httpf to QUIC — full feature parity with 0-RTT reconnection
+- **v0.2:** Native QUIC multipath + connection migration (QuicEther's core differentiator)
+- **v0.3:** Server mesh over QUIC + enterprise features
+- **v1.0:** Cross-platform, mobile SDKs, production hardening
 
-Each phase delivers tangible value to at least one persona while building toward the full vision.
+Because ~80% of the architecture is a direct port from httpf, QuicEther can reach feature parity faster than a greenfield project. The genuinely new work — native multipath and connection migration — is concentrated in v0.2.
 
 **Next Chapter:** We will outline **testing and validation strategies** for QuicEther across unit, integration, performance, and chaos testing.
 

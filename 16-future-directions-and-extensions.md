@@ -2,291 +2,342 @@
 
 ## Introduction
 
-By this point, we have a solid design for QuicEther’s **core**:
-- Distributed discovery over a Kademlia‑style DHT
-- Encrypted QUIC overlay with optional multipath
-- Zero‑trust policy and audit
-- TUN‑based L3 VPN with gateway routing
-- A single `quicether` daemon/CLI binary
+By this point, QuicEther has a solid foundation ported from HTTP Fabric's validated design:
+- Hub-based multi-tenancy with CIDR IP allocation
+- Server mesh for geographic distribution and cascade routing
+- Three-tier authentication (Ed25519 identity, passwords, service tokens)
+- Proxmox-style firewall engine and policy system
+- Encrypted QUIC overlay with native multipath
+- TUN-based L3 VPN with virtual NAT and bridge mode
+- A single `quicether` binary with `server`/`connect`/`bridge` commands
+- Comprehensive audit logging (JSONL + syslog)
 
-This chapter looks beyond the initial versions toward **future directions and extensions**. The goal is not to promise roadmap dates, but to outline plausible evolutions that are consistent with the principles from Chapter 4.
+> **httpf validation:** The architecture above is not speculative — it was built and
+> tested in HTTP Fabric over HTTP/WebSocket. QuicEther ports these proven patterns
+> to native QUIC for better performance, native multipath, and connection migration.
+
+This chapter looks beyond the initial versions toward **future directions and extensions**. The goal is not to promise roadmap dates, but to outline plausible evolutions consistent with the principles from Chapter 4.
 
 We will cover:
+- Direct peer connections (P2P as an optimization)
 - Protocol and transport enhancements
 - Advanced multipath features
-- Stronger identity and trust mechanisms (including optional blockchain usage)
-- Richer policy and application‑layer features
-- Better developer experience and ecosystem integrations
-- Long‑term architectural considerations
+- Post-quantum cryptography activation
+- Richer policy and application-layer features
+- Developer experience and ecosystem integrations
+- Long-term architectural considerations
 
 ---
 
-## 16.1 Protocol & Transport Enhancements
+## 16.1 Direct Peer Connections
 
-### 16.1.1 QUIC Extension Support
+### 16.1.1 Motivation
 
-As the QUIC ecosystem evolves, new extensions and drafts may become widely implemented. QuicEther can selectively adopt those that provide real value:
+QuicEther v1.x routes all traffic through servers (hub-and-spoke). This is simple, reliable, and matches httpf's proven model. However, for latency-sensitive workloads between two clients on the same LAN or nearby networks, **direct peer-to-peer QUIC connections** could eliminate the server hop.
 
-- **Multipath QUIC standardization**
-  - Move from draft/experimental implementations to standardized multipath once available and mature.
-  - Track interoperability with mainstream QUIC stacks and browsers.
+### 16.1.2 Server-Assisted P2P
 
-- **Datagram Extensions**
-  - Use QUIC DATAGRAM for some low‑latency, lossy‑tolerant control signals (e.g., path probes) where appropriate.
+The server already knows client addresses from QUIC connection metadata. A future extension could:
 
-- **Improved Congestion Control Algorithms**
-  - Explore BBR or BBR‑like algorithms when widely available and stable in chosen Rust QUIC libraries.
-  - Expose tuning hooks carefully in `[performance]` for experts, while keeping safe defaults.
+1. Client A requests direct connection to Client B via the server.
+2. Server shares connection candidates (IP:port pairs) with both clients.
+3. Clients attempt QUIC connection directly using ICE-like techniques.
+4. If direct connection succeeds, traffic bypasses the server.
+5. If direct connection fails, traffic continues through the server (fallback).
 
-### 16.1.2 IPv6 & Dual‑Stack First‑Class Support
+```
+Client A ──QUIC──> Server ──QUIC──> Client B   (current: always)
+Client A ──QUIC──────────────────> Client B     (future: when possible)
+```
 
-While the initial design is IPv4‑centric for simplicity, future versions should:
-- Provide full **dual‑stack support** (IPv4 and IPv6) over the overlay.
-- Allow IPv6 overlay addressing with clear configuration patterns.
-- Use IPv6 where available on underlay paths for better end‑to‑end reachability.
+### 16.1.3 NAT Traversal Helpers
 
-This may include:
-- `tun_addr_v6` and `advertise_subnets_v6` fields in configuration.
-- DHT records explicitly indicating address families.
+For direct connections to work across NATs:
+- **STUN-like probing**: Discover public IP:port mappings via the server.
+- **TURN-like relay**: Server acts as relay when direct connection is impossible.
+- **PCP/UPnP**: Opportunistic use of local router APIs for port mapping.
 
-### 16.1.3 Better NAT Traversal Techniques
+Design principles:
+- Direct connections are an **optimization**, not a requirement.
+- The server-based path is always the fallback.
+- No separate relay infrastructure — the existing server fills this role.
 
-Over time, more sophisticated NAT traversal techniques could be explored:
-- Pluggable STUN/TURN‑like helpers (still **not** special relay roles in the architecture sense; more like *assistants* for bootstrapping connectivity).
-- Integration with OS‑/router‑specific APIs for dynamic port mapping.
-- Opportunistic use of new standards (e.g., PCP/Port Control Protocol successors, UPnP improvements) where securely possible.
+### 16.1.4 DHT for Large-Scale Discovery (Research)
 
-Any such enhancements must respect the **no mandatory central relay** principle.
+For very large deployments (thousands of nodes), a Kademlia-style DHT could supplement server mesh for peer discovery. This would:
+- Reduce load on mesh servers for peer lookups.
+- Enable decentralized discovery without a central server.
+- Require careful Sybil resistance design.
+
+This is a research direction for v2.0+, not a near-term priority.
 
 ---
 
-## 16.2 Advanced Multipath Features
+## 16.2 Protocol & Transport Enhancements
 
-### 16.2.1 Application‑Aware Scheduling
+### 16.2.1 QUIC Extension Support
 
-Today’s design largely treats all packets equally, with hints via `interactive_max_rtt_ms` and similar knobs. Future versions could:
-- Classify flows by **application or QoS requirements** (e.g., interactive terminal vs bulk sync).
-- Use DSCP bits, port ranges, or explicit user tagging to infer traffic class.
-- Map traffic classes onto **per‑class schedulers** with different latency vs throughput trade‑offs.
+As the QUIC ecosystem evolves, QuicEther can adopt extensions that provide real value:
+
+- **Multipath QUIC Standardization**
+  - Move from experimental to standardized multipath once RFC is finalized.
+  - Track interoperability with quinn and other Rust QUIC stacks.
+
+- **QUIC DATAGRAM Extension (RFC 9221)**
+  - Use for low-latency, lossy-tolerant signals (path probes, keepalives).
+  - Already supported by quinn — activation is straightforward.
+
+- **Congestion Control**
+  - Explore BBRv2 when available and stable in quinn.
+  - Expose tuning hooks in `[performance]` for experts, keeping safe defaults.
+
+- **0-RTT Resumption**
+  - QUIC 0-RTT for reconnection without full handshake.
+  - Already supported at protocol level — needs session ticket management.
+
+### 16.2.2 IPv6 Dual-Stack Enhancements
+
+httpf already supports dual-stack (`subnet_v6` in hub config). Future improvements:
+- IPv6-only overlay networks for modern deployments.
+- Happy Eyeballs-style path selection (prefer IPv6 when faster).
+- IPv6 flow labels for multipath hints.
+
+### 16.2.3 Kernel Bypass & io_uring
+
+For high-throughput deployments:
+- **io_uring** for zero-copy packet processing on Linux.
+- **AF_XDP** for kernel bypass on dedicated networking hardware.
+- **DPDK** integration for carrier-grade throughput (requires dedicated NICs).
+
+These would be opt-in modes for specific deployment scenarios, not defaults.
+
+---
+
+## 16.3 Advanced Multipath Features
+
+### 16.3.1 Application-Aware Scheduling
+
+The current design uses performance profiles (latency/balanced/throughput/maxperformance). Future versions could add flow-level classification:
+
+- Classify flows by DSCP bits, port ranges, or explicit user tagging.
+- Map traffic classes onto per-class schedulers with different trade-offs.
 
 Example future config:
 
 ```toml
-[multipath.classes.interactive]
+[performance.classes.interactive]
 max_rtt_ms = 50
 redundancy = true
+match_ports = [22, 3389]
 
-[multipath.classes.bulk]
+[performance.classes.bulk]
 min_bandwidth_mbps = 10
 redundancy = false
+match_ports = [873, 9418]   # rsync, git
 ```
 
-### 16.2.2 Learning‑Based Path Selection
+### 16.3.2 Learning-Based Path Selection
 
 Beyond static policies:
 - Collect historical path metrics (RTT, loss, jitter, outage frequency).
-- Learn patterns (e.g., cellular path is bad during commute hours) and **adapt scheduling**.
-- Optionally expose a plugin API so external agents (even ML‑based) can drive path selection.
+- Learn patterns (e.g., cellular path degrades during commute hours).
+- Optionally expose a plugin API for external agents to drive path selection.
 
-This must remain **safe** and **observable**:
-- Clear logs when policies change due to learning.
+Requirements:
+- Clear logging when policies change due to learning.
 - Administrative override to pin specific behavior.
+- No silent behavior changes.
 
-### 16.2.3 Multipath Across Heterogeneous Access Types
+### 16.3.3 Heterogeneous Access Types
 
-Future deployments may mix:
-- Home broadband, 5G/4G, satellite, and in‑office Wi‑Fi.
+Future deployments may mix home broadband, 5G/4G, satellite, and Wi-Fi. QuicEther could:
+- Model each link's cost (metered/unmetered) and capacity.
+- Support user-defined preferences:
+  - "Avoid satellite except when all others fail."
+  - "Use cellular only for interactive traffic."
 
-QuicEther could:
-- Model each link’s **cost** and **cap**, not just bandwidth/latency.
-- Support user‑defined preferences:
-  - “Avoid satellite except when others fail.”
-  - “Use cellular only for interactive traffic.”
-
----
-
-## 16.3 Identity, Trust & Optional Blockchain
-
-From the beginning, we intentionally **punted** on blockchain and heavy PKI in order to get a working, testable system. Long‑term, there are interesting extensions.
-
-### 16.3.1 Stronger PKI Integrations
-
-For enterprises and larger deployments:
-- Integration with **existing PKI** (corporate CAs, ACME, etc.).
-- Automated issuance and rotation of node certificates based on NodeId or device identity.
-- Support for **short‑lived certificates** tied to device management systems.
-
-### 16.3.2 Decentralized Trust Registries (Optional)
-
-Some communities may want a **public, append‑only ledger** of:
-- Node public keys and associated metadata.
-- Revocations or misconduct reports.
-- Community governance decisions.
-
-Options include:
-- Using an existing blockchain (e.g., as a key transparency log).
-- A simpler append‑only log replicated via DHT rather than a full smart‑contract platform.
-
-Any such design must:
-- Remain **optional**: the core QuicEther overlay should function without it.
-- Respect privacy and minimal data collection.
-- Avoid binding real‑world identities unless explicitly configured.
-
-### 16.3.3 Sybil Resistance & Reputation (Research Direction)
-
-Open, public meshes face Sybil risks. Possible mitigations (beyond scope for early versions):
-- **Reputation systems** based on observed behavior (e.g., uptime, routing honesty).
-- **Stake or cost** to creating identities (e.g., proof‑of‑work, proof‑of‑stake, or other resource‑bounded mechanisms).
-- **Web‑of‑trust** style endorsements of nodes.
-
-These are non‑trivial to get right and will require careful research and community input.
+> **QUIC advantage:** Native connection migration handles link switching seamlessly,
+> which httpf had to implement at the application layer over TCP.
 
 ---
 
-## 16.4 Richer Policy & Application‑Layer Features
+## 16.4 Post-Quantum Cryptography
 
-### 16.4.1 Higher‑Level Policy Objects
+### 16.4.1 ML-KEM-768 Activation
 
-Instead of only CIDR‑based rules, we may want:
-- **Named applications** (e.g., "ssh", "git", "k8s‑api") as policy objects.
-- **Device groups** (e.g., "dev‑laptops", "prod‑gateways").
-- Time‑based conditions (e.g., allow from 09:00–18:00 UTC).
+QuicEther's crypto design already accounts for post-quantum readiness:
+- X25519 ECDH for current key exchange.
+- **ML-KEM-768** (formerly Kyber) as hybrid post-quantum extension.
+
+Activation plan:
+1. **Phase 1 (v1.x)**: X25519 only. ML-KEM-768 code paths present but disabled.
+2. **Phase 2 (v2.0)**: Hybrid X25519 + ML-KEM-768 optional via config:
+   ```toml
+   [network]
+   key_exchange = "hybrid"   # "x25519" | "hybrid" | "ml-kem-768"
+   ```
+3. **Phase 3 (v3.0+)**: Hybrid default once NIST standards are finalized and widely deployed.
+
+### 16.4.2 TLS 1.3 Post-Quantum
+
+QUIC mandates TLS 1.3. When post-quantum TLS cipher suites (e.g., ML-KEM for TLS key exchange) become available in rustls:
+- QuicEther inherits them automatically through quinn.
+- Both transport-layer and data-plane encryption benefit.
+
+### 16.4.3 Hash Algorithm Migration
+
+BLAKE3 is quantum-resistant (256-bit output). No migration needed for hashing. Argon2id password hashing is also unaffected by quantum computing.
+
+---
+
+## 16.5 Richer Policy & Application-Layer Features
+
+### 16.5.1 Higher-Level Policy Objects
+
+Beyond CIDR-based rules, future policy could support:
+- **Named services** (e.g., "ssh", "git", "k8s-api") as policy objects.
+- **Identity groups** (e.g., "dev-team", "contractors") mapped from auth backends.
+- **Time-based conditions** (e.g., allow from 09:00-18:00 UTC).
 
 Example future rule:
 
 ```toml
-[[rules]]
-subject_group = "dev-laptops"
-application = "ssh"
-object = "10.0.0.0/16"
+[[hubs.policies]]
+name = "dev-ssh-hours"
+src_group = "dev-team"
+service = "ssh"
+dst_subnet = "10.0.0.0/16"
 action = "allow"
 time_window = "09:00-18:00Z"
 ```
 
-This implies deeper integration with:
-- Local process metadata (to identify applications).
-- External inventory or CMDB systems for device grouping.
+### 16.5.2 External Policy Engines
 
-### 16.4.2 Application‑Layer Visibility (Carefully Scoped)
+Integration with external policy decision points:
+- **OPA (Open Policy Agent)**: Query OPA for complex authorization decisions.
+- **LDAP/AD**: Sync identity groups from enterprise directories.
+- QuicEther acts as Policy Enforcement Point (PEP), external system as PDP.
 
-While QuicEther is intentionally **network‑layer focused**, some teams may want limited application insight:
+```toml
+[policy.external]
+type = "opa"
+endpoint = "http://localhost:8181/v1/data/quicether/allow"
+timeout_ms = 100
+cache_ttl_secs = 60
+```
+
+### 16.5.3 Application-Layer Visibility (Carefully Scoped)
+
+QuicEther is intentionally network-layer focused. Limited future visibility could include:
 - Aggregate statistics by port or service name.
-- Limited sampling of connection metadata (never payload) for troubleshooting.
-
-Any such feature must:
-- Be **opt‑in** and clearly flagged.
-- Respect privacy and minimize sensitive data.
-
-### 16.4.3 Pluggable Policy Engines
-
-In the long run, it may be useful to:
-- Allow external policy decision points (PDPs) like OPA (Open Policy Agent).
-- Have the QuicEther daemon act as a policy enforcement point (PEP) querying remote PDPs.
-
-This would support:
-- Dynamic, context‑aware decisions (e.g., user risk score, device posture).
-- Centralized policy management for large organizations.
+- Connection metadata sampling (never payload) for troubleshooting.
+- All visibility features must be **opt-in** and privacy-respecting.
 
 ---
 
-## 16.5 Developer Experience & Ecosystem
+## 16.6 Developer Experience & Ecosystem
 
-### 16.5.1 SDKs & Client Libraries
+### 16.6.1 SDKs & Client Libraries
 
-To make QuicEther easier to integrate into other systems, future work could include:
-- **Language‑specific SDKs** (Rust, Go, Python, TypeScript) that talk to the daemon’s control API.
-- Idiomatic wrapper libraries for:
-  - Querying peer status and routes.
-  - Pushing policy updates.
-  - Watching audit events in real time.
+Language-specific SDKs for the admin API:
+- **Rust**: Native crate (already available as library).
+- **Go / Python / TypeScript**: Wrappers for REST admin API.
+- Idiomatic interfaces for querying sessions, pushing policy, watching audit events.
 
-### 16.5.2 Plugin & Extension System
+### 16.6.2 Plugin & Extension System
 
-Rather than baking every feature into the core daemon, we might eventually:
-- Define a **plugin interface** (local gRPC/JSON‑RPC or WASM) for:
+Rather than baking every feature into the core:
+- Define a **plugin interface** (local gRPC/JSON-RPC or WASM) for:
   - Custom path schedulers
-  - External policy adapters
-  - Specialized monitoring or export formats
+  - External auth adapters
+  - Specialized monitoring exporters
 
 This keeps the core lean while allowing experimentation.
 
-### 16.5.3 GUI & Web Management
+### 16.6.3 GUI & Web Management
 
-Many users will appreciate a graphical dashboard:
-- Web UI served by a small companion process or the daemon itself.
-- Views for topology, connection health, and policy rules.
-- Wizards for common deployment scenarios (personal VPN, homelab, SMB site‑to‑site).
+Build on the existing admin API:
+- Web UI served by the admin port for topology, session health, and firewall rules.
+- Wizards for common deployment scenarios (personal VPN, homelab, SMB multi-site).
+- The CLI/admin API remains **primary** — GUI is a layer on top.
 
-The design should:
-- Treat the CLI/IPC API as **primary**.
-- Build GUI/Web as a layer on top (no hidden magic).
+### 16.6.4 Mobile Enhancements
 
----
-
-## 16.6 Ecosystem Integrations
-
-### 16.6.1 Kubernetes & Cloud Native
-
-Future integrations may include:
-- **Kubernetes operator** for managing `quicether` sidecars or gateways in clusters.
-- CRDs for overlay subnets and policies.
-- Automatic joining of cluster nodes to the overlay for multi‑cluster networking.
-
-### 16.6.2 Infrastructure as Code
-
-Tighter integrations with tools like Terraform or Pulumi:
-- Terraform provider for QuicEther policy and config.
-- Automated provisioning of gateways and bootstrap nodes.
-
-### 16.6.3 Monitoring & Security Tools
-
-Deep integrations with:
-- Prometheus, Grafana dashboards, and alert rules.
-- SIEM systems for audit log ingestion.
-- EDR/XDR tools for additional endpoint protections, using QuicEther context as a signal.
+httpf already has mobile FFI (iOS/Android). Future mobile-specific features:
+- **Always-on VPN** integration with OS VPN APIs.
+- **On-demand connect** rules (connect when accessing specific domains).
+- **Battery-aware multipath**: Prefer Wi-Fi over cellular to save battery.
+- **Split tunnel by app**: Route specific apps through VPN (Android per-app VPN API).
 
 ---
 
-## 16.7 Long‑Term Architectural Considerations
+## 16.7 Ecosystem Integrations
 
-### 16.7.1 Scalability Limits & Sharding
+### 16.7.1 Kubernetes & Cloud Native
 
-As deployments grow, questions arise:
-- How many nodes can one DHT comfortably support?
-- Do we need **logical shards** (e.g., per‑organization overlays) with controlled peering between them?
+- **Kubernetes operator**: Manage QuicEther servers and mesh topology via CRDs.
+- **CNI plugin**: QuicEther as a Kubernetes network plugin for multi-cluster networking.
+- Automatic joining of cluster nodes to the overlay.
 
-Future work may include:
-- Multiple overlay instances per daemon, each with its own DHT namespace.
-- Explicit, configurable **peering links** between overlays.
+### 16.7.2 Infrastructure as Code
 
-### 16.7.2 Interoperability with Other Systems
+- **Terraform provider**: Manage hubs, firewall rules, auth backends, and mesh peers.
+- **Ansible roles**: Automated deployment of server and client nodes.
+- **Docker/Podman**: Official container images with health checks.
 
-Over time, QuicEther may:
-- Interoperate with existing VPNs or SD‑WAN systems via standard tunnels (IPsec, WireGuard) at the edges.
-- Provide **gateway plugins** that translate between QuicEther and other overlays.
+### 16.7.3 Monitoring & Security Tools
 
-### 16.7.3 Governance & Community
+Deeper integrations with:
+- **Prometheus/Grafana**: Pre-built dashboards and alert rules for mesh health.
+- **SIEM systems**: Audit log ingestion via syslog forwarding (already supported).
+- **EDR/XDR tools**: QuicEther connection context as a security signal.
 
-If QuicEther gains broad adoption, non‑technical issues become important:
-- Transparent decision‑making around protocol changes.
+---
+
+## 16.8 Long-Term Architectural Considerations
+
+### 16.8.1 Scalability
+
+Current architecture scales well for most deployments:
+- Single server: hundreds of concurrent clients.
+- Server mesh: thousands of clients across regions.
+
+For very large deployments (10,000+ nodes):
+- Hub sharding: multiple hub instances per server.
+- Mesh hierarchy: regional mesh clusters with inter-region peering.
+- Connection pooling and session offloading.
+
+### 16.8.2 Interoperability
+
+QuicEther may need to interoperate with existing infrastructure:
+- **WireGuard gateway**: Translate between QuicEther and WireGuard peers at edges.
+- **IPsec gateway**: Bridge to legacy VPN infrastructure.
+- **SD-WAN integration**: Act as an overlay endpoint in SD-WAN deployments.
+
+### 16.8.3 Governance & Community
+
+If QuicEther gains broad adoption:
+- Transparent decision-making for protocol changes.
 - Stable versioning and deprecation policies.
 - Security response and disclosure processes.
-
-While not purely technical, these shape the long‑term health of the project.
+- Community-driven feature prioritization.
 
 ---
 
 ## Summary
 
-This chapter outlined **possible futures** for QuicEther:
-- Enhancements to QUIC transport, NAT traversal, and IPv6 support
-- Advanced multipath strategies and learning‑based scheduling
-- Stronger identity and optional decentralized trust registries
-- Richer policy models and potential application‑aware features
-- Better developer experience, plugins, and ecosystem integrations
-- Long‑term scalability and governance considerations
+This chapter outlined **possible futures** for QuicEther beyond the initial httpf-validated release:
 
-None of these are mandatory for a useful first version, but they sketch a path for QuicEther to grow from a practical distributed VPN into a flexible, extensible networking platform.
+| Category | Near-Term (v1.x) | Medium-Term (v2.0) | Long-Term (v3.0+) |
+|----------|-------------------|---------------------|---------------------|
+| **Connectivity** | Server-based only | Server-assisted P2P | DHT discovery |
+| **Multipath** | Failover + redundant | App-aware scheduling | Learning-based |
+| **Crypto** | X25519 + ChaCha20 | Hybrid ML-KEM-768 | PQ-only option |
+| **Policy** | Firewall + ACLs | Time-based + groups | External OPA/LDAP |
+| **Platform** | Linux/macOS/Windows | Mobile (iOS/Android) | Kubernetes CNI |
+| **Scale** | Single server + mesh | Hub sharding | Mesh hierarchy |
+
+The key insight from building httpf: **start with what works, extend carefully**. Every feature in this chapter builds on the validated foundation rather than requiring architectural changes. The server-based model provides a reliable fallback, and optimizations like P2P connections are additive improvements.
 
 ---
 

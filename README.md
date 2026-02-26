@@ -1,13 +1,19 @@
-# QuicEther Pre-Development Book
+# QuicEther Design Book (v2.0 — Post-httpf Revision)
 
 ## What This Is
 
-This is a **pre-development analysis and design document** for QuicEther. Think of it as the "requirements and architecture bible" that should be written **before** any code is written.
+This is the **design and architecture document** for QuicEther — a Layer 3 VPN built on native QUIC transport.
+
+> **Post-httpf Revision (Feb 2026):** This book has been comprehensively revised
+> to reflect lessons learned from building HTTP Fabric (httpf), a working L3 VPN
+> that tunnels IP packets over HTTP/WebSocket. QuicEther ports httpf's validated
+> architecture to native QUIC (RFC 9000), replacing HTTP/WebSocket with QUIC
+> streams for better performance, native multipath, and connection migration.
 
 It answers:
-- **Why** are we building this?
+- **Why** are we building this? (And what httpf proved)
 - **What** problems does it solve?
-- **How** should it work (architecturally)?
+- **How** should it work? (Grounded in httpf's validated architecture)
 - **Who** is it for?
 
 ## Reading Order
@@ -25,7 +31,7 @@ Start here to understand the problem space:
    - Why isn't it good enough?
    - What can we learn from it?
 
-3. **[User Stories & Use Cases](./03-user-stories-and-use-cases.md)**
+3. **[User Stories & Use Cases](./03-user-stories.md)**
    - Who will use QuicEther?
    - What will they do with it?
    - What are the real-world scenarios?
@@ -44,14 +50,14 @@ Once you understand the problem, explore the solution:
    - What are the interfaces between them?
 
 6. **[Technology Choices & Trade-offs](./06-technology-choices.md)**
-   - Why Rust? Why QUIC? Why Kademlia?
+   - Why Rust? Why QUIC? Why server mesh?
    - What did we reject and why?
-   - What are the risks?
+   - What httpf validated?
 
 ### Phase 3: Technical Deep-Dive (Chapters 7-11)
 For implementers who need to understand the details:
 
-7. **[DHT & Discovery](./07-dht-and-discovery.md)**
+7. **[Server Mesh & Discovery](./07-server-mesh-and-discovery.md)**
 8. **[QUIC Transport & Multipath](./08-quic-and-multipath.md)**
 9. **[Security Model & Zero-Trust](./09-security-and-zero-trust.md)**
 10. **[VPN Interface & Routing](./10-vpn-interface-and-routing.md)**
@@ -79,7 +85,7 @@ Longer-term thinking and extensions:
 ✅ **Chapter 4:** Core Principles & Philosophy (Complete)  
 ✅ **Chapter 5:** High-Level Architecture (Complete)  
 ✅ **Chapter 6:** Technology Choices & Trade-offs (Complete)  
-✅ **Chapter 7:** DHT & Discovery (Complete)  
+✅ **Chapter 7:** Server Mesh & Discovery (Complete)  
 ✅ **Chapter 8:** QUIC Transport & Multipath (Complete)  
 ✅ **Chapter 9:** Security Model & Zero-Trust (Complete)  
 ✅ **Chapter 10:** VPN Interface & Routing (Complete)  
@@ -90,7 +96,9 @@ Longer-term thinking and extensions:
 ✅ **Chapter 15:** Configuration Reference (Complete)  
 ✅ **Chapter 16:** Future Directions & Extensions (Complete)  
 
-🚧 Further chapters: To be defined as the project evolves
+� **[Architecture Diagrams](./diagrams/architecture.md)** — Mermaid diagrams of system architecture
+
+*All chapters revised to reflect httpf validation (Feb 2026).*
 
 ## How to Use This Book
 

@@ -34,10 +34,10 @@ We conceptually structure streams as:
 
 | Stream Type | Direction | Purpose |
 |------------|-----------|---------|
-| Control    | Bi-dir    | Keepalives, config negotiation, heartbeats |
-| Data       | Uni-dir   | Encapsulated IP packets (TUN traffic) |
-| DHT RPC    | Bi-dir    | DHT messages (optional; DHT may also use UDP) |
-| Metrics    | Uni-dir   | Optional stats, debugging |
+| Control    | Bi-dir    | Authentication, keepalives, config negotiation, heartbeats |
+| Data       | Uni-dir   | Encapsulated IP packets (PacketBatch tunnel traffic) |
+| Mesh       | Bi-dir    | Server mesh protocol (hub updates, route sync) |
+| Metrics    | Uni-dir   | Optional stats, monitoring, audit events |
 
 Implementation detail:
 - Specific stream IDs and framing are an internal concern; architecture assumes logical separation.
@@ -75,21 +75,34 @@ We do **not** define a new VPN protocol from scratch. Instead, we:
 - Treat each IP packet (or small batch) as the payload of a QUIC stream frame
 - Optionally add a small header for metadata (e.g., QoS flags, flow ID)
 
-### 8.2.2 Encapsulation Format (Conceptual)
+### 8.2.2 PacketBatch Format (Proven in httpf)
+
+Instead of sending one IP packet per QUIC frame, QuicEther uses a **PacketBatch** format validated in httpf for amortizing per-frame overhead:
 
 ```text
-+----------------------+--------------------+
-| Encapsulation Header | Original IP Packet |
-+----------------------+--------------------+
++----------------+--------+------------------+--------+------------------+-----+
+| num_packets:u16| size:u16| IP Packet 1      | size:u16| IP Packet 2      | ... |
++----------------+--------+------------------+--------+------------------+-----+
 ```
 
-Header fields (minimal):
-- Version (1 byte)
-- Flags (1 byte)
-  - e.g., priority, redundancy hint
-- Flow ID (4 bytes, optional) – group packets for scheduling heuristics
+```rust
+struct PacketBatch {
+    num_packets: u16,
+    packets: Vec<SizedPacket>,
+}
 
-We keep header small to minimize overhead.
+struct SizedPacket {
+    size: u16,       // Length of the IP packet
+    data: Vec<u8>,   // Raw IP packet bytes
+}
+```
+
+Design rationale:
+- **Batching** reduces per-packet QUIC frame overhead
+- **No version/flags header** — QUIC already provides framing, encryption, and ordering
+- **Simple `size:u16` prefix** per packet enables zero-copy parsing
+- **LZ4 compression** applied to the entire batch payload before QUIC encryption
+- httpf proved that batching 4-8 packets per frame improves throughput by ~15-20%
 
 ---
 
@@ -97,24 +110,32 @@ We keep header small to minimize overhead.
 
 ### 8.3.1 Establishing a Connection
 
-Scenario: Node A wants to talk to Node B.
+Scenario: Client A connects to Server S.
 
-1. **Discovery:**
-   - A queries DHT for `NodeId B` → gets addresses and capabilities
+1. **Server Address:**
+   - Client has server address from config (e.g., `server = "vpn.example.com:4433"`)
+   - No DHT lookup needed — direct connection to known server
 
 2. **QUIC Handshake:**
-   - A creates QUIC endpoint, initiates connection to one or more candidate addresses
-   - TLS 1.3 mutual authentication verifies B’s identity (NodeId)
+   - Client creates QUIC endpoint, connects to server address
+   - TLS 1.3 with server certificate validation
+   - 0-RTT supported for reconnections (session tickets)
 
-3. **Capability Negotiation:**
-   - On control stream, A and B exchange:
-     - Supported QUIC versions
-     - Multipath support
-     - Preferred MTU
-     - Optional features (compression, DSCP policies, etc.)
+3. **Authentication (Three-Tier):**
+   - On control stream, client authenticates via one of:
+     - **Ed25519 identity** — cryptographic identity verification
+     - **Password** — Argon2id-hashed credential
+     - **Service token** — pre-shared key for server mesh peers
+   - Server validates and assigns client to a hub
 
-4. **Ready State:**
-   - Once control stream handshake completes, data streams are opened
+4. **Hub Assignment & IP Allocation:**
+   - Server assigns virtual IP from hub's CIDR pool
+   - Sends hub configuration (allowed routes, DNS, firewall rules)
+   - Data streams are opened for PacketBatch tunnel traffic
+
+5. **Ready State:**
+   - Client configures TUN interface with assigned IP
+   - Bidirectional tunnel is established
 
 ### 8.3.2 Maintaining a Connection
 
@@ -174,8 +195,8 @@ Paths are discovered by:
 - For each, building candidate `(local_addr, remote_addr)` pairs
 
 Remote address choices:
-- Primary peer address discovered via DHT
-- Additional peer addresses learned from QUIC’s path discovery
+- Server address from configuration
+- Additional server addresses from mesh discovery or DNS
 
 Path lifecycle:
 1. Create candidate path in **Probing** state
@@ -230,7 +251,25 @@ impl Scheduler for WeightedScheduler {
 Trade-off:
 - Higher bandwidth cost for increased reliability/latency improvement
 
-### 8.4.4 Reordering & Congestion
+### 8.4.4 Performance Profiles (from httpf)
+
+httpf validated four named profiles that map to scheduler configurations:
+
+| Profile | Scheduler | Behavior |
+|---------|-----------|----------|
+| `latency` | Latency-Aware | Prefer lowest-RTT path, backup only on failure |
+| `balanced` | Weighted | Distribute across paths proportional to bandwidth |
+| `throughput` | Weighted + Aggressive | Maximize aggregate bandwidth, tolerate reordering |
+| `max_performance` | All paths + Redundant | Use every path, duplicate critical packets |
+
+```toml
+[transport]
+performance_profile = "balanced"  # latency | balanced | throughput | max_performance
+```
+
+These profiles are syntactic sugar over the raw scheduler parameters, providing users a simple knob while preserving full customizability via `[multipath]` config.
+
+### 8.4.5 Reordering & Congestion
 
 Multipath introduces reordering:
 - Packets on high-RTT paths may arrive later than those on low-RTT paths
@@ -251,8 +290,8 @@ Congestion control:
 
 1. Application writes packet → kernel routes to TUN `quicether0`
 2. QuicEther reads IP packet from TUN
-3. Routing table determines next-hop NodeId
-4. Connection manager selects/establishes QUIC connection to next-hop
+3. Routing table determines destination (server or mesh peer)
+4. Connection manager selects existing QUIC connection to server
 5. Multipath scheduler chooses active path for this packet
 6. Packet encapsulated and sent via QUIC
 
@@ -261,7 +300,7 @@ Congestion control:
 1. QUIC receives encapsulated payload on any path
 2. QuicEther decrypts & decapsulates to original IP packet
 3. If destination IP is local → write to TUN
-4. Else → re-consult routing table and forward over QUIC to another peer (routing node behavior)
+4. Else → server re-consults routing table and forwards via hub or mesh peer
 
 Interaction detail:
 - Routing layer does not care which path was used; it only deals with logical connection
@@ -319,14 +358,16 @@ Multipath manager:
 
 Compared to kernel VPNs (e.g., WireGuard):
 - User-space QUIC adds:
-  - Encryption overhead
+  - Encryption overhead (TLS 1.3 via QUIC, plus optional ChaCha20-Poly1305 inner layer)
   - Stream framing overhead
   - Copy overhead between user and kernel
+  - LZ4 compression/decompression cost
 
-Mitigations:
-- Batch reads/writes from TUN
+Mitigations (validated in httpf):
+- **PacketBatch** — amortize per-packet overhead by batching 4-8 packets per QUIC frame
+- **LZ4 compression** — fast compression reduces bytes on wire; net win for most traffic
+- Batch reads/writes from TUN via `sendmmsg`/`recvmmsg` where applicable
 - Use send/recv buffers tuned to NIC and MTU
-- Enable features like `sendmmsg`/`recvmmsg` where applicable
 - Use Rust with `tokio` and async I/O for high concurrency
 
 ### 8.7.2 MTU and Fragmentation
@@ -356,8 +397,9 @@ Approaches:
 ### 8.8.1 Simple Single-Path QUIC
 
 ```bash
-# Use only a single interface (eth0), no multipath
-quicether start \
+# Connect to server with single interface, no multipath
+quicether connect \
+  --server vpn.example.com:4433 \
   --interfaces eth0 \
   --multipath disable
 ```
@@ -368,8 +410,9 @@ Use case:
 ### 8.8.2 Basic Multipath
 
 ```bash
-# Use WiFi + LTE for aggregation
-quicether start \
+# Connect with WiFi + LTE for aggregation
+quicether connect \
+  --server vpn.example.com:4433 \
   --interfaces wlan0,wwan0 \
   --multipath aggregate
 ```
@@ -381,6 +424,9 @@ Behavior:
 ### 8.8.3 Advanced Multipath with Policies
 
 ```toml
+[transport]
+performance_profile = "balanced"
+
 [multipath]
 enabled = true
 mode = "aggregate"         # or "failover"
@@ -432,21 +478,23 @@ bulk_min_bandwidth_mbps = 5
 ## Summary
 
 In this chapter we:
-- Described how QuicEther uses QUIC connections and streams
-- Detailed encapsulation of IP packets over QUIC
-- Designed a multipath layer with paths, schedulers, and monitoring
-- Explained failure handling and performance considerations
+- Described how QuicEther uses QUIC connections and streams for client-server tunneling
+- Detailed the **PacketBatch** encapsulation format (proven in httpf)
+- Designed a multipath layer with paths, schedulers, and **performance profiles**
+- Explained server-based connection lifecycle with three-tier authentication
+- Covered failure handling and performance considerations
 
 Multipath over QUIC is a **core differentiator** of QuicEther, enabling:
 - Aggregation of multiple ISPs
 - Seamless roaming
 - Resilient connections across unstable networks
+- **Named performance profiles** (latency/balanced/throughput/max_performance) for simple tuning
 
 **Next Chapter:** We will focus on the security and zero-trust aspects (authentication, authorization, and policy enforcement) in depth.
 
 ---
 
 **Chapter Navigation:**
-- [← Previous: Chapter 7 - DHT & Discovery](./07-dht-and-discovery.md)
+- [← Previous: Chapter 7 - Server Mesh & Discovery](./07-server-mesh-and-discovery.md)
 - [↑ Table of Contents](./README.md)
 - [→ Next: Chapter 9 - Security & Zero-Trust](./09-security-and-zero-trust.md)

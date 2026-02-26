@@ -20,7 +20,7 @@ The goal is a **single binary** (`quicether`) that can act as:
 
 - **Single binary:** Simplify distribution and packaging
 - **Scriptable:** CLI with predictable output formats for automation
-- **Safe defaults:** `quicether start` should "just work" for most users
+- **Safe defaults:** `quicether server` or `quicether connect` should "just work" for most users
 - **Clear separation:** Data plane in daemon, control via CLI/API
 - **OS‑friendly:** Integrate with systemd/launchd/Windows services
 
@@ -30,22 +30,38 @@ The goal is a **single binary** (`quicether`) that can act as:
 
 ### 11.2.1 Modes of Operation
 
-`quicether` supports several subcommands:
+`quicether` supports several subcommands (proven in httpf):
 
 ```bash
-quicether start       # Start daemon (foreground or background)
-quicether stop        # Stop running daemon
-quicether status      # Show daemon status
-quicether config      # Inspect or modify configuration
-quicether peers       # List discovered peers
-quicether routes      # Show overlay routes
-quicether multipath   # Show per‑path stats
-quicether logs        # Stream daemon logs
+# Server mode
+quicether server         # Start VPN server (foreground or background)
+quicether server stop    # Stop running server
+
+# Client mode
+quicether connect        # Connect to a VPN server
+quicether bridge         # Connect + forward local subnet
+
+# Identity & auth management
+quicether identity       # Generate or show Ed25519 identity
+quicether password       # Manage password authentication
+
+# Server administration
+quicether hub            # List/create/modify hubs
+quicether session        # List/inspect active sessions
+quicether admin          # Admin API operations
+quicether audit          # Query audit logs
+
+# Diagnostic
+quicether status         # Show connection status
+quicether routes         # Show overlay routes
+quicether multipath      # Show per-path stats
+quicether logs           # Stream daemon logs
 ```
 
 Under the hood:
-- **Daemon mode:** `quicether start` runs long‑lived process managing TUN, QUIC, DHT, etc.
-- **CLI mode:** All other subcommands are short‑lived clients that talk to the daemon over a local IPC channel.
+- **Server mode:** `quicether server` runs long-lived process managing TUN, QUIC, hubs, sessions, mesh, etc.
+- **Client mode:** `quicether connect` establishes tunnel to server and manages TUN
+- **CLI mode:** Administrative subcommands are short-lived clients that talk to the daemon over a local IPC channel or admin API.
 
 ### 11.2.2 IPC Channel
 
@@ -104,22 +120,24 @@ Within the daemon process:
 │         │                    │
 │  ┌──────▼──────────┐         │
 │  │ Runtime State   │         │
-│  │ (Node, DHT,     │         │
-│  │  QUIC, TUN, etc)│         │
+│  │ (Auth, Hubs,     │         │
+│  │  QUIC, TUN, etc) │         │
 │  └──────┬──────────┘         │
 │         │                    │
 │  ┌──────▼───────────┐        │
-│  │ IPC Server       │        │
-│  │ (CLI/API)        │        │
+│  │ IPC / Admin API  │        │
+│  │ (CLI/GUI/REST)   │        │
 │  └──────────────────┘        │
 └──────────────────────────────┘
 ```
 
 Key responsibilities:
-- Initialize networking (TUN, QUIC)
-- Join DHT and maintain routing tables
-- Enforce policies and forward packets
-- Expose control API for CLI and GUIs
+- Initialize networking (TUN, QUIC listener)
+- Manage hubs, sessions, and authentication
+- Enforce firewall and policy rules
+- Forward packets between clients and mesh peers
+- Expose admin API for CLI and GUIs
+- Write audit logs
 
 ### 11.3.2 Runtime State Struct
 
@@ -128,14 +146,19 @@ Conceptual Rust structure:
 ```rust
 struct DaemonState {
     config: Config,
-    node_id: NodeId,
-    dht: DhtNode,
-    transport: QuicTransport,
+    identity: Identity,           // Ed25519 keypair + BLAKE3 NodeId
+    auth: AuthService,            // Three-tier auth (Ed25519/password/service token)
+    transport: QuicTransport,     // QUIC listener + connections
     tun: TunInterface,
-    router: PacketRouter,
+    hubs: HubManager,             // Virtual networks with IP pools
+    sessions: SessionManager,     // Active client sessions
+    router: PacketRouter,         // Virtual NAT + routing
+    firewall: FirewallEngine,     // Proxmox-style ACL rules
+    policy: PolicyEngine,         // Per-identity L3/L4 rules
     multipath: PathManager,
-    policy: PolicyEngine,
-    metrics: Metrics,
+    mesh: MeshManager,            // Server mesh peer connections
+    audit: AuditLogger,           // JSONL + syslog
+    metrics: Metrics,             // Prometheus metrics
     health: HealthStatus,
 }
 ```
@@ -168,41 +191,63 @@ Example:
 tun_name = "quicether0"
 
 # Override at runtime
-QUICETHER_TUN_NAME=qe0 quicether start --tun-name qe1
+QUICETHER_TUN_NAME=qe0 quicether server --tun-name qe1
 # Effective tun_name: qe1 (flag wins)
 ```
 
-### 11.4.2 Sample Config File
+### 11.4.2 Sample Config Files
+
+**Server configuration:**
 
 ```toml
-[node]
-name = "hq-gateway"
-role = "gateway"  # or "standard"
+[server]
+listen = "0.0.0.0:4433"
 
-[network]
-tun_name = "quicether0"
-tun_addr = "10.0.0.1/16"
-advertise_subnets = ["10.0.0.0/16"]
+[auth]
+method = "password"  # or "identity" or "service_token"
 
-[discovery]
-bootstrap_mode = true
-bootstrap_nodes = [
-  "bootstrap.quicether.org:9000"
-]
+[[hubs]]
+name = "default"
+subnet = "10.100.0.0/24"
+dns = ["1.1.1.1", "8.8.8.8"]
 
-[multipath]
-enabled = true
-interfaces = ["eth0", "eth1"]
-mode = "aggregate"   # or "failover"
+[firewall]
+default_action = "deny"
 
-[security]
-policy_file = "/etc/quicether/policy.toml"
-audit_log = "/var/log/quicether/audit.json"
+[[firewall.rules]]
+action = "allow"
+src = "10.100.0.0/24"
+dst = "10.100.0.0/24"
+
+[mesh]
+enabled = false
 
 [monitoring]
 metrics_addr = "127.0.0.1:9090"
-health_addr = "127.0.0.1:9091"
 log_level = "info"
+
+[audit]
+file = "/var/log/quicether/audit.jsonl"
+syslog = false
+```
+
+**Client configuration:**
+
+```toml
+[client]
+server = "vpn.example.com:4433"
+
+[auth]
+method = "password"
+username = "sarah"
+
+[transport]
+performance_profile = "balanced"
+
+[multipath]
+enabled = true
+interfaces = ["eth0", "wlan0"]
+mode = "aggregate"
 ```
 
 ---
@@ -218,33 +263,41 @@ log_level = "info"
 
 ### 11.5.2 Example Commands
 
-#### 11.5.2.1 Start & Stop
+#### 11.5.2.1 Server & Client
 
 ```bash
-# Start with defaults (foreground)
-quicether start
+# Start server with config (foreground)
+quicether server --config /etc/quicether/server.toml
 
-# Start as background daemon (Unix)
-quicether start --daemon
+# Start server as background daemon (Unix)
+quicether server --config server.toml --daemon
 
-# Stop running daemon
-quicether stop
+# Connect to server as client
+quicether connect --server vpn.example.com:4433
+
+# Connect as bridge (forwarding local subnet)
+quicether bridge --server vpn.example.com:4433 --local-subnet 192.168.1.0/24
+
+# Stop running server
+quicether server stop
 ```
 
 Internally:
-- `start --daemon` forks and detaches, leaving daemon in background
-- `stop` sends an IPC request `Shutdown {}` to daemon
+- `server --daemon` forks and detaches, leaving daemon in background
+- `server stop` sends an IPC request `Shutdown {}` to daemon
 
 #### 11.5.2.2 Status
 
 ```bash
 quicether status
-# Human‑readable output:
-# Node ID: node_abc123
+# Human-readable output:
+# Identity: sarah (Ed25519)
+# Server: vpn.example.com:4433
+# Hub: office
+# Virtual IP: 10.100.0.5/24
 # Uptime: 1h 23m
-# Peers: 7
 # Paths: 2 (eth0, wlan0)
-# TUN: quicether0 (100.64.0.10/16)
+# Bytes: 1.2 GB sent, 3.4 GB recv
 
 # JSON output for scripts
 quicether status --json
@@ -254,50 +307,71 @@ JSON example:
 
 ```json
 {
-  "node_id": "node_abc123",
+  "identity": "sarah",
+  "server": "vpn.example.com:4433",
+  "hub": "office",
+  "virtual_ip": "10.100.0.5/24",
   "uptime_sec": 4980,
-  "peers": 7,
   "paths": [
     {"if": "eth0", "rtt_ms": 11.2, "state": "active"},
     {"if": "wlan0", "rtt_ms": 35.7, "state": "active"}
   ],
-  "tun": {
-    "name": "quicether0",
-    "addr": "100.64.0.10/16"
-  }
+  "bytes_sent": 1288490188,
+  "bytes_recv": 3650722201
 }
 ```
 
-#### 11.5.2.3 Peers
+#### 11.5.2.3 Sessions (Server-Side)
 
 ```bash
-quicether peers
-# NodeID          | Address           | RTT   | Status
-# node_home       | 203.0.113.5:9000  | 15ms  | Connected
-# node_hq_gateway | 198.51.100.10:9000| 45ms  | Connected (gateway)
+quicether session list
+# Identity    | Hub     | Virtual IP   | Connected  | Bytes Sent | Bytes Recv
+# sarah       | office  | 10.100.0.5   | 2h 15m     | 1.2 GB     | 3.4 GB
+# james       | office  | 10.100.0.6   | 45m        | 234 MB     | 567 MB
+
+# Disconnect a session
+quicether session disconnect sarah
 
 # JSON
-quicether peers --json
+quicether session list --json
 ```
 
-#### 11.5.2.4 Routes
+#### 11.5.2.4 Hubs (Server-Side)
 
 ```bash
-quicether routes
-# Destination      | Next Hop        | Type     |
-# 192.168.1.0/24   | node_home       | Node     |
-# 10.0.0.0/16      | node_hq_gateway | Gateway  |
-# 0.0.0.0/0        | node_dc_gateway | Default  |
+quicether hub list
+# Name    | Subnet         | Clients | Max
+# office  | 10.100.0.0/24  | 5       | 253
+# dev     | 10.100.1.0/24  | 2       | 253
+
+# Create a new hub
+quicether hub create --name staging --subnet 10.100.2.0/24
 ```
 
-#### 11.5.2.5 Config Management
+#### 11.5.2.5 Identity Management
 
 ```bash
-# Show effective config (after merging file/env/flags)
-quicether config show
+# Generate new Ed25519 identity
+quicether identity generate
+# Identity: a1b2c3d4... (BLAKE3 hash of public key)
+# Private key saved to: ~/.config/quicether/identity.key
 
-# Edit config with $EDITOR
-quicether config edit
+# Show current identity
+quicether identity show
+```
+
+#### 11.5.2.6 Audit Log Query
+
+```bash
+# Query recent audit events
+quicether audit --last 100
+
+# Filter by identity
+quicether audit --identity sarah --last 50
+
+# Filter by event type
+quicether audit --event firewall_deny --last 20
+```
 
 # Validate config file
 quicether config validate /etc/quicether/config.toml
@@ -318,7 +392,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/quicether start --daemon=false
+ExecStart=/usr/bin/quicether server --config /etc/quicether/server.toml
 Restart=on-failure
 User=quicether
 Group=quicether
@@ -346,7 +420,9 @@ A `.plist` file (simplified):
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/quicether</string>
-    <string>start</string>
+    <string>server</string>
+    <string>--config</string>
+    <string>/etc/quicether/server.toml</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -357,7 +433,7 @@ A `.plist` file (simplified):
 ### 11.6.3 Windows Service
 
 - Use standard Windows service framework
-- `quicether.exe start --service` registers as a service
+- `quicether.exe server --service` registers as a service
 
 ---
 
@@ -423,7 +499,8 @@ quicether diag
 CLI examples:
 
 ```bash
-quicether start --log-level debug
+quicether server --config server.toml --log-level debug
+quicether connect --server vpn.example.com:4433 --log-level debug
 quicether logs --level warn
 ```
 
@@ -437,18 +514,26 @@ A possible Rust workspace organization:
 quicether/
   Cargo.toml
   src/main.rs          # CLI entrypoint & subcommands
+  src/commands.rs      # Command dispatch (server, connect, bridge, etc.)
+  src/config.rs        # Config structs, loading, merging
 
-  daemon/
-    src/lib.rs         # DaemonState, run_loop
+  src/server/
+    mod.rs             # Server mode (listener, hub, session, mesh)
 
-  cli/
-    src/lib.rs         # CLI parsing, IPC client
+  src/client/
+    mod.rs             # Client mode (connect, bridge, transport)
 
-  ipc/
-    src/lib.rs         # JSON-RPC types, socket handling
+  src/auth/
+    mod.rs             # Three-tier auth (identity, password, service_token)
 
-  config/
-    src/lib.rs         # Config structs, loading, merging
+  src/network/
+    mod.rs             # Firewall, policy, packet routing
+
+  src/protocol/
+    mod.rs             # QUIC framing, PacketBatch, handshake
+
+  crates/ffi/
+    src/lib.rs         # Mobile FFI (iOS/Android)
 ```
 
 This separation keeps concerns clean while still producing a single binary.
@@ -457,11 +542,12 @@ This separation keeps concerns clean while still producing a single binary.
 
 ## Summary
 
-This chapter defined how QuicEther is **operated**:
+This chapter defined how QuicEther is **operated** (matching httpf's proven model):
 
-- A single `quicether` binary acts as both daemon and CLI
-- The daemon manages all networking, discovery, routing, and policy
-- The CLI and potential GUIs communicate via a stable local IPC API
+- A single `quicether` binary acts as server, client, bridge, and admin CLI
+- The server manages hubs, sessions, authentication, firewall, policy, and mesh
+- The client connects to a server and manages local TUN interface
+- CLI provides `session`, `hub`, `identity`, `password`, `audit`, and `admin` subcommands
 - Configuration follows a clear precedence: defaults → file → env → flags
 - Integration guidance is provided for systemd, launchd, and Windows services
 

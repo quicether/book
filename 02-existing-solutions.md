@@ -213,7 +213,7 @@ Peer A <======> Peer B (direct)
 - Solves discovery, but we still need everything else
 - Need to adapt for our use case (not file sharing)
 
-**Key Insight:** We should use Kademlia for discovery (proven tech) but need QUIC for transport.
+**Key Insight:** Kademlia proves distributed discovery works at scale. QuicEther uses server mesh for discovery (validated by httpf) with DHT as a possible future extension for very large deployments.
 
 ### IPFS
 
@@ -243,6 +243,38 @@ Content-addressed storage + libp2p networking
 ---
 
 ## Category 5: Custom Protocols
+
+### HTTP Fabric (httpf) — Our Experimental Precursor
+
+**Architecture:**
+```
+Client -----> httpf Server (Hub) -----> Internet / Mesh Servers
+       HTTPS/WebSocket Tunnel
+```
+
+**What It Proved:**
+- ✅ Hub-based multi-tenancy with IP pools
+- ✅ Three-tier auth (Ed25519 + Argon2id passwords + service tokens)
+- ✅ Virtual NAT router with firewall & policy engine
+- ✅ Server mesh (server-to-server tunnels)
+- ✅ Cascade/multi-hop routing
+- ✅ Parallel TCP stream aggregation (SoftEther-style)
+- ✅ Mobile FFI (iOS/Android) from single Rust codebase
+- ✅ Packet batching with LZ4 compression + ChaCha20-Poly1305 encryption
+- ✅ Rate limiting, audit logging, admin REST API
+
+**Limitations:**
+- ❌ HTTP/WebSocket over TCP adds overhead and head-of-line blocking
+- ❌ TCP-based multipath requires app-level reordering/deduplication
+- ❌ No native connection migration (TCP breaks on IP change)
+- ❌ WebSocket framing adds unnecessary overhead for raw packet tunneling
+- ❌ Cannot do true transport-level multipath
+
+**Why Not Stay with httpf:**
+- The architecture is proven but the transport layer is the bottleneck
+- QUIC eliminates every TCP/HTTP limitation while preserving everything that works
+
+**Key Insight:** httpf validated the architecture, auth, security, and feature set. QuicEther keeps all of it and replaces only the transport: QUIC instead of HTTP/WebSocket.
 
 ### QUIC (IETF RFC 9000)
 
@@ -274,7 +306,7 @@ Content-addressed storage + libp2p networking
 
 ## Comparison Matrix
 
-| Feature | OpenVPN | WireGuard | Tailscale | ZeroTier | Nebula | SD-WAN | **QuicEther** |
+| Feature | OpenVPN | WireGuard | Tailscale | ZeroTier | Nebula | SD-WAN | httpf | **QuicEther** |
 |---------|---------|-----------|-----------|----------|--------|--------|---------------|
 | **Direct Connection** | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
 | **Auto Discovery** | ❌ | ❌ | ✅ | ✅ | ⚠️ | ✅ | ✅ |
@@ -335,37 +367,22 @@ Rather than reinvent everything, QuicEther should leverage proven technologies:
 
 **Decision:** Use QUIC as transport foundation.
 
-### 2. Discovery Layer: Kademlia DHT
+### 2. Discovery Layer: Server Mesh + Bootstrap
 
 **Why:**
-- Proven at scale (BitTorrent: 100M+ nodes)
-- No central server required
-- Self-healing and resilient
-- O(log n) lookup time
+- httpf proved server-to-server mesh tunnels work for distributed topology
+- No DHT complexity for initial versions
+- Bootstrap nodes for client discovery
+- Mesh auto-reconnects with exponential backoff
 
 **Alternatives Considered:**
-- Chord DHT: More complex, no significant benefit
+- Kademlia DHT: Proven at scale, but adds complexity — deferred to future versions
 - Centralized database: Single point of failure
 - DNS-based: Requires infrastructure, not distributed
 
-**Decision:** Use Kademlia DHT for node discovery.
+**Decision:** Server mesh for v1, Kademlia DHT as optional future extension.
 
-### 3. Persistent State: Blockchain (Optional)
-
-**Why:**
-- DHT is ephemeral (lost on restart)
-- Need persistent identity/route mappings
-- Distributed consensus for multi-writer scenario
-- Proven tech (Bitcoin, Ethereum)
-
-**Alternatives Considered:**
-- Centralized database: Single point of failure
-- CRDT: Complex for this use case
-- Paxos/Raft: Requires fixed quorum (inflexible)
-
-**Decision:** Optional blockchain for persistent state, default to DHT-only for simplicity.
-
-### 4. Implementation Language: Rust
+### 3. Implementation Language: Rust
 
 **Why:**
 - Memory safety (no segfaults, buffer overflows)
@@ -383,6 +400,15 @@ Rather than reinvent everything, QuicEther should leverage proven technologies:
 ---
 
 ## Lessons from Existing Solutions
+
+### From HTTP Fabric (httpf):
+- ✅ Hub-based multi-tenancy is essential for real deployments
+- ✅ Server mesh provides distributed topology without DHT complexity
+- ✅ Three-tier auth (identity + password + service tokens) covers all use cases
+- ✅ Firewall + policy engine is critical for enterprise adoption
+- ✅ Single binary design simplifies deployment enormously
+- ✅ Mobile FFI from shared Rust core is achievable
+- ❌ Don't use HTTP/WebSocket as transport — QUIC is strictly better
 
 ### From Tailscale:
 - ✅ Zero-config setup is crucial
@@ -403,10 +429,11 @@ Rather than reinvent everything, QuicEther should leverage proven technologies:
 - ❌ Don't require enterprise pricing/complexity
 
 ### From IPFS/libp2p:
-- ✅ DHT-based discovery works
+- ✅ Distributed discovery works at scale
 - ✅ Multipath transport possible
 - ✅ NAT traversal solvable
 - ❌ Don't overengineer the abstraction layers
+- ❌ DHT adds complexity — start with server mesh, add DHT later
 
 ---
 
@@ -421,17 +448,18 @@ Rather than reinvent everything, QuicEther should leverage proven technologies:
 5. **Open source** with no proprietary components
 
 **QuicEther combines the best of:**
+- httpf's proven architecture (hubs, auth, firewall, mesh, cascade, FFI)
 - WireGuard's simplicity and security
 - Tailscale's auto-discovery and ease of use
 - SD-WAN's multipath capabilities
-- BitTorrent's distributed architecture
-- QUIC's modern transport features
+- QUIC's modern transport features (multipath, migration, 0-RTT)
 
 **While avoiding:**
+- HTTP/WebSocket overhead (replaced by native QUIC)
 - Vendor lock-in (Tailscale, ZeroTier)
 - Complexity (SD-WAN, OpenVPN)
 - Cost (SD-WAN, commercial VPNs)
 - Centralization (OpenVPN, traditional VPNs)
-- Limited scalability (user-owned = scales with user investment)
+- DHT complexity in early versions (server mesh first, DHT later)
 
 Next chapter: We'll explore the concrete use cases and user stories that drive QuicEther's design.
