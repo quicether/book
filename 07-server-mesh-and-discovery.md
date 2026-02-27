@@ -79,11 +79,11 @@ service_token = "mesh-secret-token-abc123"
 
 # Mesh peer configuration
 [[mesh.peers]]
-address = "server-b.example.com:9443"
+url = "quic://server-b.example.com:9443"
 token = "mesh-secret-token-xyz789"
 
 [[mesh.peers]]
-address = "server-c.example.com:9443"
+url = "quic://server-c.example.com:9443"
 token = "mesh-secret-token-def456"
 
 # Local hubs
@@ -95,7 +95,7 @@ name = "office"
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mesh.peers[].address` | `String` | Yes | `host:port` of the mesh peer |
+| `mesh.peers[].url` | `String` | Yes | `quic://host:port` of the mesh peer |
 | `mesh.peers[].token` | `String` | Yes | Service token to authenticate to this peer |
 | `service_token` | `String` | For mesh | Token that peers use to authenticate to us |
 
@@ -231,35 +231,35 @@ impl MeshForwardingTable {
 }
 ```
 
-### Route Propagation
+### Hub Propagation
 
-When a mesh peer's hubs change (new hub added, hub removed, CIDR changed), the peer sends a `HubUpdate` message on the control stream:
+When a mesh peer's hubs change (new hub added, hub removed), the peer sends a `HubUpdate` message on the control stream:
 
 ```
-Server B adds new hub "qa" (10.50.0.0/24):
+Server B adds new hub "qa":
 1. Server B sends HubUpdate to all mesh peers
-2. Server A receives HubUpdate, updates routing table:
-   - 10.200.0.0/24 → mesh_peer_b (existing)
-   - 10.50.0.0/24  → mesh_peer_b (new)
-3. Clients on Server A can now reach 10.50.0.0/24
+2. Server A receives HubUpdate, updates hub-to-peer table:
+   - hub "dev"  → mesh_peer_b (existing)
+   - hub "qa"   → mesh_peer_b (new)
+3. Clients on Server A can now reach clients in hub "qa" via cascade
 ```
 
-### Multi-Hop Routing
+### Multi-Hop Frame Forwarding
 
-In a mesh with 3+ servers, packets may need to traverse multiple hops:
+In a mesh with 3+ servers, frames may need to traverse multiple hops:
 
 ```
-Server A (10.100.0.0/24) ←→ Server B (10.200.0.0/24) ←→ Server C (10.50.0.0/24)
+Server A (hub: office) ←→ Server B (hub: dev) ←→ Server C (hub: staging)
 
 If Server A has no direct mesh tunnel to Server C:
-- Server A knows: 10.50.0.0/24 → mesh_peer_b (learned via HubUpdate relay)
-- Packet from A's client to 10.50.0.2:
-  1. A forwards to B via mesh tunnel
-  2. B's routing table: 10.50.0.0/24 → mesh_peer_c
-  3. B forwards to C via mesh tunnel
-  4. C delivers to local client
+- Server A knows: hub "staging" → mesh_peer_b (learned via HubUpdate relay)
+- Frame from A's client (MAC 02:aa:01) to unknown MAC 02:cc:03:
+  1. A's MAC table has no entry → flood to mesh peers
+  2. B receives frame, checks local MAC table → no entry → forwards to C
+  3. C's MAC table: 02:cc:03 → local session → deliver to client
+  4. Reply frame follows reverse path, each hop learns the MAC mapping
 
-TTL limit: max 4 hops (configurable) to prevent routing loops
+TTL limit: max 4 hops (configurable) to prevent forwarding loops
 ```
 
 ---

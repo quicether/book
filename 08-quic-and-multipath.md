@@ -80,13 +80,14 @@ We do **not** define a new VPN protocol from scratch. Instead, we:
 Instead of sending one Ethernet frame per QUIC frame, QuicEther uses a **FrameBatch** format validated in httpf for amortizing per-frame overhead:
 
 ```text
-+----------------+--------+------------------+--------+------------------+-----+
-| num_frames:u16 | size:u16| Ethernet Frame 1 | size:u16| Ethernet Frame 2 | ... |
-+----------------+--------+------------------+--------+------------------+-----+
++----------+----------------+--------+------------------+--------+------------------+-----+
+| ver:u8   | num_frames:u16 | size:u16| Ethernet Frame 1 | size:u16| Ethernet Frame 2 | ... |
++----------+----------------+--------+------------------+--------+------------------+-----+
 ```
 
 ```rust
 struct FrameBatch {
+    version: u8,     // Protocol version (currently 1)
     num_frames: u16,
     frames: Vec<SizedFrame>,
 }
@@ -98,8 +99,8 @@ struct SizedFrame {
 ```
 
 Design rationale:
+- **1-byte version prefix** enables protocol evolution without breaking backward compatibility
 - **Batching** reduces per-frame QUIC stream overhead
-- **No version/flags header** — QUIC already provides framing, encryption, and ordering
 - **Simple `size:u16` prefix** per frame enables zero-copy parsing
 - **LZ4 compression** applied to the entire batch payload before QUIC encryption
 - httpf proved that batching 4-8 frames per QUIC stream write improves throughput by ~15-20%
@@ -263,11 +264,11 @@ httpf validated four named profiles that map to scheduler configurations:
 | `max_performance` | All paths + Redundant | Use every path, duplicate critical frames |
 
 ```toml
-[transport]
-performance_profile = "balanced"  # latency | balanced | throughput | max_performance
+[performance]
+profile = "balanced"  # latency | balanced | throughput | maxperformance
 ```
 
-These profiles are syntactic sugar over the raw scheduler parameters, providing users a simple knob while preserving full customizability via `[multipath]` config.
+These profiles are syntactic sugar over the raw scheduler parameters, providing users a simple knob while preserving full customizability via `[network.multipath]` config.
 
 ### 8.4.5 Reordering & Congestion
 
@@ -414,7 +415,7 @@ Use case:
 quicether connect \
   --server vpn.example.com:4433 \
   --interfaces wlan0,wwan0 \
-  --multipath aggregate
+  --multipath split
 ```
 
 Behavior:
@@ -424,20 +425,19 @@ Behavior:
 ### 8.8.3 Advanced Multipath with Policies
 
 ```toml
-[transport]
-performance_profile = "balanced"
+[performance]
+profile = "balanced"
 
-[multipath]
-enabled = true
-mode = "aggregate"         # or "failover"
+[network.multipath]
+mode = "split"             # or "failover"
 interfaces = ["eth0", "eth1", "wwan0"]
 
-[multipath.weights]
+[network.multipath.weights]
 eth0 = 1.0   # Office LAN
 eth1 = 2.0   # Fast fiber
 wwan0 = 0.5  # Expensive LTE
 
-[multipath.policies]
+[network.multipath.policies]
 # Interactive traffic prefer low-latency
 interactive_max_rtt_ms = 50
 # Bulk traffic can use all paths

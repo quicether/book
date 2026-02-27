@@ -76,10 +76,10 @@ This is the same foundational approach that made SoftEther VPN one of the most v
 
 ## Document Status
 
-**Version:** 2.0 (Post-httpf Revision)  
+**Version:** 3.0 (L2/TAP Architecture + Virtual TAP)  
 **Date:** February 27, 2026  
 **Status:** Living Document — revised based on httpf implementation experience  
-**Previous Version:** v1.0 (Pre-Development, November 2025)
+**Previous Versions:** v1.0 (Pre-Development, November 2025), v2.0 (Post-httpf, L3 → client-server)
 
 ---
 
@@ -87,19 +87,20 @@ This is the same foundational approach that made SoftEther VPN one of the most v
 
 The original book was written before any code existed, envisioning a pure peer-to-peer system with Kademlia DHT as the foundation. After building httpf end-to-end, major revisions reflect proven reality:
 
-| Aspect | v1.0 (Theory) | v2.0 (Post-httpf) |
-|--------|---------------|-------------------|
-| **Topology** | Pure P2P, every node equal | Client-server with Virtual Hubs; server mesh for distribution |
-| **Network Layer** | L3 (IP/TUN) | L2 (Ethernet/TAP) — SoftEther-inspired virtual switching |
-| **Discovery** | Kademlia DHT from day 1 | Server-based; DHT deferred to future versions |
-| **Protocol** | Conceptual QUIC encapsulation | Proven FrameBatch framing with LZ4 + ChaCha20 |
-| **Auth** | TLS 1.3 mutual auth only | Three-tier: Ed25519 identity + password + service tokens |
-| **Hashing** | SHA-1 for NodeId | BLAKE3 for all hashing |
-| **Server features** | Minimal routing | Virtual Hub (L2 switch), SecureNAT (optional), firewall, policy, audit |
-| **DHCP/ARP** | Server provides virtual NAT | Physical router handles DHCP/ARP; SecureNAT as fallback |
-| **Networking** | Direct P2P only | Server mesh + cascade connections between hubs |
-| **Mobile** | Not mentioned | FFI crate with iOS/Android support |
-| **Blockchain** | Optional future feature | Removed entirely |
+| Aspect | v1.0 (Theory) | v2.0 (Post-httpf) | v3.0 (Current) |
+|--------|---------------|-------------------|----------------|
+| **Topology** | Pure P2P, every node equal | Client-server with routing | Client-server with Virtual Hubs (L2 switches); server mesh |
+| **Network Layer** | L3 (IP/TUN) | L3 (IP/TUN) | L2 (Ethernet/TAP) — SoftEther-inspired virtual switching |
+| **Device Abstraction** | TUN only | TUN only | TAP (native) + Virtual TAP (client shim for TUN-only platforms) |
+| **Discovery** | Kademlia DHT from day 1 | Server-based | Server mesh; DHT deferred to future versions |
+| **Protocol** | Conceptual QUIC encapsulation | QUIC + FrameBatch | Proven FrameBatch framing with LZ4 + ChaCha20 |
+| **Auth** | TLS 1.3 mutual auth only | Three-tier | Three-tier: Ed25519 identity + password + service tokens |
+| **Hashing** | SHA-1 for NodeId | BLAKE3 | BLAKE3 for all hashing |
+| **Server features** | Minimal routing | IP routing + firewall | Virtual Hub (L2 switch), SecureNAT (optional), firewall, policy, audit |
+| **DHCP/ARP** | Server provides virtual NAT | Server-managed | Physical router handles DHCP/ARP; SecureNAT as fallback |
+| **Networking** | Direct P2P only | Server mesh | Server mesh + cascade connections between hubs |
+| **Mobile** | Not mentioned | FFI crate | FFI crate with iOS/Android via Virtual TAP |
+| **Blockchain** | Optional future feature | Removed | Removed entirely |
 
 ---
 

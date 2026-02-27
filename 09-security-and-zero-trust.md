@@ -82,7 +82,7 @@ Authentication flow:
 1. QUIC connection established with TLS 1.3
 2. Client sends auth credentials on control stream
 3. Server validates against configured auth method
-4. On success: assigns hub, allocates virtual IP, opens data streams
+4. On success: assigns hub, assigns MAC address, opens data streams
 5. On failure: connection rejected, event logged to audit trail
 
 ### 9.2.3 TLS 1.3 Transport Security
@@ -145,24 +145,21 @@ QuicEther implements two complementary policy engines, validated in httpf:
 
 ```toml
 # Firewall rules (first match wins)
+# Primary matching is L2 (MAC-based); optional L3/L4 deep inspection
 [[firewall.rules]]
 action = "allow"
-src = "10.100.0.0/24"
-dst = "10.100.0.0/24"
-comment = "Allow intra-hub traffic"
+hub = "office"                   # Match by hub (Ethernet segment)
+comment = "Allow all intra-hub traffic"
 
 [[firewall.rules]]
 action = "allow"
-src = "10.100.0.0/24"
-dst = "0.0.0.0/0"
-port = "80,443"
+src_mac = "02:aa:bb:cc:00:*"     # MAC prefix wildcard
+port = "80,443"                  # L4 deep inspection (parsed from frame payload)
 protocol = "tcp"
 comment = "Allow web traffic"
 
 [[firewall.rules]]
 action = "deny"
-src = "0.0.0.0/0"
-dst = "0.0.0.0/0"
 comment = "Default deny"
 ```
 
@@ -174,15 +171,15 @@ comment = "Default deny"
 [[rules]]
 id = "dev-to-hq"
 subject = "node_sarah_laptop"    # NodeId or alias
-object = "10.0.0.0/16"           # Subnet
+object = "hub:office"            # Hub (Ethernet segment)
 action = "allow"
 
 [[rules]]
-id = "sales-to-hq-readonly"
+id = "sales-web-only"
 subject = "group:sales"
-object = "10.0.0.0/16"
+object = "hub:office"
 action = "allow"
-constraints = { methods = ["GET"], ports = [80, 443] }
+constraints = { ports = [80, 443], protocol = "tcp" }
 
 [[rules]]
 id = "deny-all-else"
@@ -283,9 +280,9 @@ Enterprises (and many small businesses) need an audit trail.
 
 Without leaking sensitive payloads, httpf validated logging:
 - Connection events:
-  - `timestamp, identity, src_ip, virtual_ip, hub, bytes_sent, bytes_recv, duration`
+  - `timestamp, identity, src_ip, mac, hub, bytes_sent, bytes_recv, duration`
 - Policy decisions:
-  - `timestamp, identity, src_ip, dst_ip, action (allow|deny), rule_id`
+  - `timestamp, identity, src_mac, dst_mac, action (allow|deny), rule_id`
 - Security-relevant events:
   - Failed authentications (with rate limiting on log volume)
   - Firewall denials
@@ -297,8 +294,8 @@ Without leaking sensitive payloads, httpf validated logging:
 Structured logs (JSONL — JSON Lines, one event per line):
 
 ```json
-{"ts":"2025-11-20T10:15:32Z","event":"session_created","identity":"sarah","hub":"office","virtual_ip":"10.100.0.5","src_ip":"203.0.113.42"}
-{"ts":"2025-11-20T10:15:33Z","event":"firewall_deny","identity":"sarah","src":"10.100.0.5","dst":"10.200.0.1","port":22,"rule":"deny-ssh"}
+{"ts":"2025-11-20T10:15:32Z","event":"session_created","identity":"sarah","hub":"office","mac":"02:aa:bb:cc:00:01","src_ip":"203.0.113.42"}
+{"ts":"2025-11-20T10:15:33Z","event":"firewall_deny","identity":"sarah","src_mac":"02:aa:bb:cc:00:01","dst_mac":"02:aa:bb:cc:00:02","port":22,"rule":"deny-ssh"}
 ```
 
 Logs can be shipped to:
@@ -473,4 +470,4 @@ QuicEther aims to be **safe by default**, while remaining flexible enough for sm
 **Chapter Navigation:**
 - [← Previous: Chapter 8 - QUIC Transport & Multipath](./08-quic-and-multipath.md)
 - [↑ Table of Contents](./README.md)
-- [→ Next: Chapter 10 - VPN Interface & Routing](./10-vpn-interface-and-routing.md)
+- [→ Next: Chapter 10 - Virtual Hub, TAP & Bridging](./10-virtual-hub-tap-and-bridging.md)

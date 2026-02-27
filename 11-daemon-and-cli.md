@@ -236,20 +236,20 @@ syslog = false
 **Client configuration:**
 
 ```toml
-[client]
-server = "vpn.example.com:4433"
+[server]
+host = "vpn.example.com"
+port = 4433
 
 [auth]
 method = "password"
 username = "sarah"
 
-[transport]
-performance_profile = "balanced"
+[performance]
+profile = "balanced"
 
-[multipath]
-enabled = true
+[network.multipath]
 interfaces = ["eth0", "wlan0"]
-mode = "aggregate"
+mode = "split"
 ```
 
 ---
@@ -562,6 +562,6 @@ With this, we have a coherent operations model that works for individuals, small
 ---
 
 **Chapter Navigation:**
-- [← Previous: Chapter 10 - VPN Interface & Routing](./10-vpn-interface-and-routing.md)
+- [← Previous: Chapter 10 - Virtual Hub, TAP & Bridging](./10-virtual-hub-tap-and-bridging.md)
 - [↑ Table of Contents](./README.md)
 - [→ Next: Chapter 12 - Implementation Roadmap](./12-implementation-roadmap.md)

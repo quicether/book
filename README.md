@@ -60,7 +60,7 @@ For implementers who need to understand the details:
 7. **[Server Mesh & Discovery](./07-server-mesh-and-discovery.md)**
 8. **[QUIC Transport & Multipath](./08-quic-and-multipath.md)**
 9. **[Security Model & Zero-Trust](./09-security-and-zero-trust.md)**
-10. **[Virtual Hub, TAP & Bridging](./10-vpn-interface-and-routing.md)**
+10. **[Virtual Hub, TAP & Bridging](./10-virtual-hub-tap-and-bridging.md)**
 11. **[Daemon & CLI Architecture](./11-daemon-and-cli.md)**
 
 ### Phase 4: Implementation Strategy (Chapters 12-15)

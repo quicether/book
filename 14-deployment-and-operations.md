@@ -200,13 +200,12 @@ Operations:
    enabled = true
 
    [[mesh.peers]]
-   address = "branch.example.com:4433"
-   service_token = "mesh-token-abc"
+   url = "quic://branch.example.com:4433"
+   token = "mesh-token-abc"
 
-   [multipath]
-   enabled = true
+   [network.multipath]
    interfaces = ["eth0", "eth1"]
-   mode = "aggregate"
+   mode = "split"
 
    [firewall]
    default_action = "deny"
@@ -241,12 +240,12 @@ interface = "eth0"
 enabled = true
 
 [[mesh.peers]]
-address = "hq.example.com:4433"
-service_token = "mesh-token-abc"
+url = "quic://hq.example.com:4433"
+token = "mesh-token-abc"
 
-[multipath]
+[network.multipath]
 interfaces = ["eth0", "eth1"]
-mode = "aggregate"
+mode = "split"
 ```
 
 ### 14.4.4 Remote Worker
@@ -352,7 +351,7 @@ Or equivalent `quicether server`/`quicether server stop` commands for non-system
 
 ### 14.6.4 Updating QuicEther
 
-2. Drain servers where possible:
+1. Drain servers where possible:
    - Use admin API to temporarily reject new sessions.
 2. Update package/binary.
 3. Restart daemon.

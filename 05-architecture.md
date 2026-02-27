@@ -599,10 +599,16 @@ comment = "Drop everything else"
 ```rust
 struct PolicyRule {
     identity: IdentityId,          // Who
-    target: IpNet,                 // Can access what subnet
-    ports: Option<Vec<PortRange>>, // On which ports
+    target: PolicyTarget,          // Hub name, MAC, or optional IP subnet
+    ports: Option<Vec<PortRange>>, // On which ports (L4 deep inspection)
     protocol: Option<Protocol>,    // TCP/UDP/ICMP
     action: PolicyAction,          // Allow/Deny
+}
+
+enum PolicyTarget {
+    Hub(String),                   // Entire hub (Ethernet segment)
+    Mac(MacAddress),               // Specific MAC
+    Subnet(IpNet),                 // Optional L3 deep inspection
 }
 
 struct PolicyEngine {
@@ -611,7 +617,7 @@ struct PolicyEngine {
 
 impl PolicyEngine {
     fn check(&self, identity: &IdentityId, frame: &[u8]) -> bool {
-        let dest_ip = extract_dest_ip_from_frame(frame);
+        let dst_mac = extract_dst_mac(frame);
         for rule in &self.rules {
             if rule.identity == *identity {
                 if let Some(ip) = dest_ip {
@@ -1146,7 +1152,7 @@ PathMonitor detects:
    
 2. Attempt to free memory:
    - Close idle connections (no traffic in 5 minutes)
-   - Flush DHT cache (keep only routing table)
+   - Expire stale MAC table entries
    - Compact logs
    
 3. If still OOM:

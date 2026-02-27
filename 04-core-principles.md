@@ -78,7 +78,7 @@ This chapter defines the **non-negotiable** principles and the **pragmatic trade
 
 ### Non-Example
 ❌ Central database with all node states  
-✅ Each node maintains local DHT routing table (160 buckets)
+✅ Each server maintains its own hub membership and MAC tables; mesh peers exchange hub lists
 
 ---
 

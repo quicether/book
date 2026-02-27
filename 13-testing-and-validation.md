@@ -70,6 +70,12 @@ We use multiple layers of testing:
 - Virtual Hub:
   - Anti-spoofing MAC validation
   - MAC-per-port limits
+- Virtual TAP (L2↔L3 translation):
+  - ARP proxy: correct ARP reply generation for known MACs
+  - Ethernet header synthesis: correct src/dst MAC, EtherType for outbound frames
+  - Ethernet header stripping: correct IP extraction from inbound frames
+  - Platform auto-detection: correct `device_mode` selection per OS
+  - Frame round-trip: IP packet → Ethernet frame → IP packet is lossless
 
 ### 13.2.2 Tooling
 

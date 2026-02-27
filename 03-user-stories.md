@@ -196,9 +196,9 @@ quicether server --config colo.toml
 quicether server --config cloud.toml
 # Public IP, mesh peer for home + colo
 
-# Laptop — Client with auto-discovery via any server
+# Laptop — Client connects to cloud server, discovers hubs via mesh
 quicether connect --server cloud.example.com
-# Discovers all hubs via server mesh
+# Hub list auto-populated via server mesh
 ```
 
 **Advanced Use Case - Plex Streaming:**
@@ -470,9 +470,9 @@ David gets board approval to migrate fully to QuicEther, saving $485k over 5 yea
 
 | Persona | Primary Use Case | Key Feature Needed | Success Metric |
 |---------|-----------------|-------------------|----------------|
-| Sarah (Developer) | Remote work | Auto-discovery, roaming | Setup < 5 min |
+| Sarah (Developer) | Remote work | Simple setup, roaming | Setup < 5 min |
 | James (Business) | Site-to-site | Easy setup, low cost | Cost < $50/mo |
-| Alex (Homelab) | Mesh network | Zero-config, multipath | Zero manual config |
+| Alex (Homelab) | Mesh network | Minimal config, multipath | Single command join |
 | Maria (Nomad) | Mobile + upload | Multipath aggregation | 2× upload speed |
 | Priya (Rural) | Bandwidth aggregation | Multi-ISP bonding | Use all connections |
 | David (Enterprise) | Replace VPN/SD-WAN | Policy, audit, scale | 80%+ cost reduction |
@@ -518,12 +518,13 @@ David gets board approval to migrate fully to QuicEther, saving $485k over 5 yea
 
 **Better Solution:** Tor, I2P (anonymity networks)
 
-### Anti-Persona 3: Enterprise with 10,000+ Employees
+### Anti-Persona 3: Mega-Enterprise (10,000+ Employees, Compliance-Heavy)
 
 **Why NOT:**
-- Requires enterprise support contracts
-- Needs certified compliance (FedRAMP, etc.)
-- Has budget for commercial solutions
+- Requires enterprise support contracts with SLAs
+- Needs certified compliance (FedRAMP, HIPAA BAA, etc.)
+- Has budget for commercial solutions with vendor support
+- Note: Mid-size enterprises like David (200 employees) ARE a good fit
 
 **Better Solution:** Cisco, Palo Alto, Zscaler (enterprise vendors with support orgs)
 
@@ -556,7 +557,7 @@ Total time to verify: 3 minutes
 ```
 Tuesday afternoon: Alex receives new Raspberry Pi
 Tuesday 15:30: Flashes microSD with OS
-Tuesday 15:35: Boots Pi, runs: curl -sSL install.quicether.net | sh
+Tuesday 15:35: Boots Pi, installs: apt install quicether && quicether connect --server home.local
 Tuesday 15:36: Pi appears in Alex's mesh topology
 Tuesday 15:37: Alex SSHs into Pi from laptop
 
@@ -592,9 +593,9 @@ User impact: Slight slowdown, no interruption, no manual intervention
 
 ### Functional Requirements
 
-1. **Auto-Discovery (All personas)**
-   - Must work without manual IP configuration
-   - Must discover peers within 30 seconds
+1. **Auto-Configuration (All personas)**
+   - Must work with minimal manual configuration (just server address)
+   - Hub membership, MAC assignment, and interface setup are automatic
    - Must work through NAT/firewall
 
 2. **Connection Migration (Sarah, Maria)**
@@ -651,15 +652,15 @@ User impact: Slight slowdown, no interruption, no manual intervention
 These personas and use cases drive our design:
 
 **Core Users:**
-1. **Remote workers** (Sarah) → Need auto-discovery, roaming
+1. **Remote workers** (Sarah) → Need simple setup, roaming
 2. **Small businesses** (James) → Need low cost, easy setup
-3. **Hobbyists** (Alex) → Need flexibility, zero-config
+3. **Hobbyists** (Alex) → Need flexibility, minimal config
 4. **Mobile users** (Maria) → Need multipath, resilience
 5. **Rural users** (Priya) → Need ISP aggregation
 6. **Enterprises** (David) → Need policy, scale, cost savings
 
 **Key Insights:**
-- Auto-discovery is non-negotiable
+- Minimal configuration is non-negotiable (server address + credentials = done)
 - Multi-path is the killer feature
 - User-owned infrastructure enables cost savings
 - Simple setup is critical for adoption

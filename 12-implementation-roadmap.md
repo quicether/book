@@ -230,7 +230,7 @@ Testing:
 
 ### 12.4.6 Phase 6: Server Mesh (v0.3)
 
-Deliverable: Multi-server mesh with cross-hub routing.
+Deliverable: Multi-server mesh with cross-hub frame forwarding.
 
 Tasks (port httpf's mesh to QUIC):
 1. Mesh peer connections via QUIC

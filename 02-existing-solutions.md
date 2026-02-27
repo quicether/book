@@ -307,18 +307,20 @@ Client -----> httpf Server (Hub) -----> Internet / Mesh Servers
 ## Comparison Matrix
 
 | Feature | OpenVPN | WireGuard | Tailscale | ZeroTier | Nebula | SD-WAN | httpf | **QuicEther** |
-|---------|---------|-----------|-----------|----------|--------|--------|---------------|
-| **Direct Connection** | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
-| **Auto Discovery** | ❌ | ❌ | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| **NAT Traversal** | ⚠️ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hard NAT Fallback** | ❌ | ❌ | Vendor | Vendor | ❌ | ✅ | User Gateway |
-| **Multipath** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| **Self-Hostable** | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ❌ | ✅ |
-| **Open Source** | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ❌ | ✅ |
-| **Vendor-Free** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ |
-| **Easy Setup** | ❌ | ⚠️ | ✅ | ✅ | ⚠️ | ❌ | ✅ |
-| **Performance** | ⚠️ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ✅ |
-| **Cost** | Free | Free | $$ | $ | Free | $$$$ | Free |
+|---------|---------|-----------|-----------|----------|--------|--------|-------|---------------|
+| **Direct Connection** | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **Auto Discovery** | ❌ | ❌ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
+| **NAT Traversal** | ⚠️ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Hard NAT Fallback** | ❌ | ❌ | Vendor | Vendor | ❌ | ✅ | User Gateway | User Gateway |
+| **Multipath** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Self-Hostable** | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ❌ | ✅ | ✅ |
+| **Open Source** | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ❌ | ✅ | ✅ |
+| **Vendor-Free** | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ |
+| **Easy Setup** | ❌ | ⚠️ | ✅ | ✅ | ⚠️ | ❌ | ✅ | ✅ |
+| **Performance** | ⚠️ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ | ✅ |
+| **L2 Transparency** | ⚠️ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ |
+| **QUIC Native** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Cost** | Free | Free | $$ | $ | Free | $$$$ | Free | Free |
 
 **Legend:**
 - ✅ Yes / Good
@@ -341,7 +343,7 @@ After analyzing all existing solutions, we find NO solution that provides:
 ✅ Fully self-hostable (no vendor dependency)
 ✅ Open source (inspect and modify)
 ✅ Easy setup (single binary, auto-configure)
-✅ High performance (10-100+ Gbps capable)
+✅ High performance (10+ Gbps target)
 ✅ Low cost (no per-user fees)
 ```
 
